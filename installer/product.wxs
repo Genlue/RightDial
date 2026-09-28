@@ -1,0 +1,47 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package Name="RightDial"
+           Manufacturer="RightDial Project"
+           Version="1.0.2.0"
+           UpgradeCode="9F7FDC41-EE18-4DD9-BB30-031AF6EC9281"
+           Scope="perMachine"
+           Compressed="yes"
+           Language="2052">
+
+    <SummaryInformation Description="RightDial - radial quick launcher" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of RightDial is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+
+    <Feature Id="Main" Title="RightDial" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="RightDial" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="AppProgramMenu" Name="RightDial" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="ProductComponents">
+      <Component Directory="INSTALLFOLDER" Id="MainExe" Guid="A1D9A6D0-4965-4D69-B4A3-7EDC842E57FF">
+        <File Id="RightDialExe" Name="RightDial.exe" Source="bin\RightDial.exe" KeyPath="yes" />
+      </Component>
+      <Component Directory="AppProgramMenu" Id="StartMenuShortcut" Guid="D502F7D7-AEC4-4364-830A-2CCEF7EAB531">
+        <Shortcut Id="SmShortcut"
+                  Name="RightDial"
+                  Description="RightDial radial menu"
+                  Target="[INSTALLFOLDER]RightDial.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemoveAppMenu" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\RightDial" Name="shortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

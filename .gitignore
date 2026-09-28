@@ -1,0 +1,9 @@
+# build outputs and intermediates
+bin/
+*.obj
+*.res
+*.wixpdb
+.vs/
+
+# refreshed by build.cmd before packaging; not part of the source tree
+dist/RightDial/RightDial.exe
