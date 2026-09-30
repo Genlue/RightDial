@@ -12,5 +12,10 @@ constexpr UINT WM_APP_SHOWSETTINGS = WM_APP + 1;  // 2nd instance -> show settin
 constexpr UINT WM_APP_TRAY         = WM_APP + 2;  // tray icon callback
 constexpr UINT WM_APP_EXEC         = WM_APP + 3;  // lParam carries heap Slot*
 constexpr UINT WM_APP_TESTWHEEL    = WM_APP + 4;  // /testwheel: show wheel at lParam pos
+// The low-level mouse hook must return almost immediately (it blocks the OS
+// raw-input thread system-wide), so all real work is deferred to the message
+// loop through these two.
+constexpr UINT WM_APP_INJECT_CLICK = WM_APP + 5;  // synthesize the swallowed click
+constexpr UINT WM_APP_SHOWWHEEL    = WM_APP + 6;  // open the wheel at lParam pos
 
 void RequestExecSlot(const Slot& s);   // thread-safe-ish: queues to main thread

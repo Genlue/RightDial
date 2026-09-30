@@ -3,7 +3,7 @@
 
   <Package Name="RightDial"
            Manufacturer="RightDial Project"
-           Version="1.0.2.0"
+           Version="1.0.3.0"
            UpgradeCode="9F7FDC41-EE18-4DD9-BB30-031AF6EC9281"
            Scope="perMachine"
            Compressed="yes"

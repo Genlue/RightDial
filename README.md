@@ -51,8 +51,8 @@
 
 | 文件 | 说明 |
 |---|---|
-| `bin/RightDial-1.0.2-setup.msi` | 安装版（MSI，中文安装向导，装到 Program Files，含开始菜单快捷方式） |
-| `bin/RightDial-1.0.2-portable.zip` | 便携版（解压即用，配置保存在 exe 同目录，附使用说明） |
+| `bin/RightDial-1.0.3-setup.msi` | 安装版（MSI，中文安装向导，装到 Program Files，含开始菜单快捷方式） |
+| `bin/RightDial-1.0.3-portable.zip` | 便携版（解压即用，配置保存在 exe 同目录，附使用说明） |
 
 安装版与便携版的行为差异仅在配置文件位置：
 - 安装版：`%APPDATA%\RightDial\config.json`
@@ -72,12 +72,37 @@ RightDial.exe /testwheel  在屏幕中央显示一次轮盘（诊断用）
 
 ```bat
 build.cmd        :: 编译 bin\RightDial.exe（cl /O1 /MT）
-build-msi.cmd    :: 生成 bin\RightDial-1.0.2-setup.msi（WiX 5，dotnet tool install --global wix --version 5.0.2）
+build-msi.cmd    :: 生成 bin\RightDial-1.0.3-setup.msi（WiX 5，dotnet tool install --global wix --version 5.0.2）
+build-hooklat.cmd :: 编译 bin\hooklat.exe（低层钩子延迟回归探针，见下）
 ```
+
+> `build.cmd` 在 `vcvars64.bat` 不可用（如受管控环境里它调用的 `reg.exe` 被拦）时会自动改为手工拼装工具链环境，无需额外配置。
 
 **发版注意**：每次发布前必须递增版本号，否则 MSI 无法覆盖升级旧版本（Windows Installer 按 ProductCode + Version 判断升级）。需同步修改：`installer/product.wxs`（Package Version）、`src/app.rc`（VERSIONINFO）、`src/app.manifest`、`build-msi.cmd` 与 `tools/update-portable.ps1` 的产物文件名、README 分发包表格。
 
 便携 zip 手工打包：`RightDial.exe` + `portable.ini`（空文件）+ 使用说明，压缩即可（`dist/` 下有现成结构）。
+
+## 低层钩子的硬性约束（勿违反）
+
+`WH_MOUSE_LL` 钩子**全局阻塞操作系统原始输入线程**：钩子过程返回之前，整个系统的鼠标输入都在等它。因此钩子过程里只能做「纯内存判断」，任何耗时操作都必须 `PostMessage` 交给消息循环执行。
+
+违反此约束的历史后果：**普通右键单击延迟约 300 ms**（右键开始菜单要等半秒），因为 `SendInput()` 在钩子内部调用时会等原始输入线程返回，最终只等到低层钩子超时。
+
+| 位置 | 禁止做的事 | 现在的做法 |
+|---|---|---|
+| `hook.cpp` 补发被吞掉的单击 | 在钩子内调 `SendInput` | `PostMessage(WM_APP_INJECT_CLICK)`，由 `main.cpp` 在消息循环里补发 |
+| `hook.cpp` 拖拽越过阈值 | 在钩子内建窗口 / 截屏 / D2D 渲染 | `PostMessage(WM_APP_SHOWWHEEL)`，由 `main.cpp` 调 `WheelShowAt` |
+| `wheel.cpp` 悬停与翻页 | 在钩子内 `RenderNow()` | `RequestRender()` 合并后 `PostMessage(WM_WHEEL_RENDER)` |
+
+回归探针（复现「吞掉按下、抬起时补发」的模式并逐事件打点）：
+
+```bat
+build-hooklat.cmd
+bin\hooklat.exe -mode 0     :: 钩子内 SendInput —— 复现故障，约 306~313 ms
+bin\hooklat.exe -mode 1     :: 延后补发     —— 修复后，约 0.013 ms
+```
+
+两种模式的日志分别在 `bin\hooklat_mode0.log` / `bin\hooklat_mode1.log`。**改动钩子相关代码后请重跑，`mode 1` 的 `dur=` 必须保持在 0.1 ms 量级。**
 
 ## 目录结构
 

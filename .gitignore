@@ -5,5 +5,8 @@ bin/
 *.wixpdb
 .vs/
 
-# refreshed by build.cmd before packaging; not part of the source tree
+# refreshed by update-portable.ps1 before packaging; not part of the source tree
 dist/RightDial/RightDial.exe
+
+# local assistant workspace (notes/memory), not part of the project
+.workbuddy/

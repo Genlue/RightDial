@@ -6,10 +6,11 @@
 static HHOOK s_mouse = nullptr;
 static HHOOK s_kbd = nullptr;
 
-enum { G_IDLE = 0, G_PEND = 1 };
+enum { G_IDLE = 0, G_PEND = 1, G_WHEEL_LAUNCH = 2 };
 static int   s_state = G_IDLE;
 static POINT s_downPt{ 0, 0 };
 static int   s_wheelAcc = 0;
+static bool  s_launchUpSeen = false;   // button released before the wheel came up
 
 static std::wstring ToLower(std::wstring s) {
     for (auto& c : s) c = (wchar_t)towlower(c);
@@ -73,6 +74,12 @@ static bool FgExcluded() {
     return g_cfg.beh.excludeFullscreen && IsFgFullscreen();
 }
 
+// Synthesize the plain click that the hook had to swallow. MUST NOT be called
+// from inside the hook procedure: a low-level hook blocks the OS raw-input
+// thread, so SendInput() would have to wait for that same thread to come back
+// and only returns after the low-level hook timeout — measured at 313 ms, which
+// is exactly the user-visible right-click lag. Deferred to the message loop the
+// same call costs ~0.02 ms (see test_hooklat.cpp).
 static void InjectTriggerClick() {
     bool mid = (g_cfg.beh.triggerButton == 2);
     INPUT in[2] = {};
@@ -83,6 +90,15 @@ static void InjectTriggerClick() {
     SendInput(2, in, sizeof(INPUT));
 }
 
+void InjectTriggerClickNow() { InjectTriggerClick(); }
+
+bool HookWheelLaunchReady() {
+    bool ok = !s_launchUpSeen;
+    s_launchUpSeen = false;
+    s_state = G_IDLE;          // the message thread owns the wheel from here on
+    return ok;
+}
+
 static LRESULT Pass(int code, WPARAM wp, LPARAM lp) { return CallNextHookEx(nullptr, code, wp, lp); }
 
 static LRESULT CALLBACK MouseProcLL(int code, WPARAM wp, LPARAM lp) {
@@ -91,6 +107,21 @@ static LRESULT CALLBACK MouseProcLL(int code, WPARAM wp, LPARAM lp) {
     UINT msg = (UINT)wp;
 
     if (m->flags & LLMHF_INJECTED) return Pass(code, wp, lp);
+
+    // A drag was recognized; the wheel is being opened by the message thread.
+    // Keep swallowing button input until it is actually up, otherwise the tail
+    // of the gesture (the button-up) leaks through to whatever is underneath.
+    if (s_state == G_WHEEL_LAUNCH) {
+        if (WheelIsOpen()) {
+            s_state = G_IDLE;
+        } else {
+            if (msg == WM_RBUTTONUP || msg == WM_MBUTTONUP || msg == WM_LBUTTONUP)
+                s_launchUpSeen = true;
+            else if (msg == WM_MOUSEMOVE)
+                return Pass(code, wp, lp);   // never eat moves: that freezes the cursor
+            return 1;
+        }
+    }
 
     if (WheelIsOpen()) {
         switch (msg) {
@@ -149,16 +180,23 @@ static LRESULT CALLBACK MouseProcLL(int code, WPARAM wp, LPARAM lp) {
     if (s_state == G_PEND) {
         if (msg == up) {
             s_state = G_IDLE;
-            InjectTriggerClick();  // plain right-click: normal context menu
+            // plain right-click: normal context menu, emitted after we return
+            if (g_mainHwnd) PostMessageW(g_mainHwnd, WM_APP_INJECT_CLICK, 0, 0);
+            else            InjectTriggerClick();
             return 1;
         }
         if (msg == WM_MOUSEMOVE) {
             float thr = g_cfg.beh.thresholdPx * ScaleForPoint(s_downPt);
             float dx = (float)(m->pt.x - s_downPt.x), dy = (float)(m->pt.y - s_downPt.y);
             if (dx * dx + dy * dy >= thr * thr) {
-                s_state = G_IDLE;
+                s_state = G_WHEEL_LAUNCH;
+                s_launchUpSeen = false;
                 s_wheelAcc = 0;
-                WheelShowAt(s_downPt);
+                if (g_mainHwnd)
+                    PostMessageW(g_mainHwnd, WM_APP_SHOWWHEEL, 0,
+                                 MAKELPARAM(s_downPt.x, s_downPt.y));
+                else
+                    WheelShowAt(s_downPt);
                 return 1;
             }
             return Pass(code, wp, lp);
@@ -193,10 +231,12 @@ void RemoveMouseHook() {
     if (s_mouse) { UnhookWindowsHookEx(s_mouse); s_mouse = nullptr; }
     s_state = G_IDLE;
     s_wheelAcc = 0;
+    s_launchUpSeen = false;
 }
 void EnsureMouseHook() {
     s_state = G_IDLE;
     s_wheelAcc = 0;
+    s_launchUpSeen = false;
     if (s_mouse) {
         UnhookWindowsHookEx(s_mouse);
         s_mouse = nullptr;
@@ -206,6 +246,7 @@ void EnsureMouseHook() {
 void ResetHookState() {
     s_state = G_IDLE;
     s_wheelAcc = 0;
+    s_launchUpSeen = false;
 }
 void InstallKbdHook() {
     if (!s_kbd)

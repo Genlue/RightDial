@@ -42,6 +42,18 @@ static LRESULT CALLBACK MainWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         WheelShowAt(pt);
         return 0;
     }
+    case WM_APP_INJECT_CLICK:
+        // emitted here, not in the hook: SendInput from inside a low-level hook
+        // stalls it for the hook timeout (~300ms) and the whole system's mouse
+        // input with it
+        InjectTriggerClickNow();
+        return 0;
+    case WM_APP_SHOWWHEEL:
+        if (HookWheelLaunchReady()) {
+            POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            WheelShowAt(pt);
+        }
+        return 0;
     case WM_APP_EXEC:
         if (lp) {
             Slot* s = (Slot*)lp;

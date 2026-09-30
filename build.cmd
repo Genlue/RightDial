@@ -11,8 +11,35 @@ if not exist "%VCVARS%" (
   echo [!] vcvars64.bat not found: "%VCVARS%"
   exit /b 1
 )
-call "%VCVARS%" >nul
+call "%VCVARS%" >nul 2>&1
 
+rem vcvars64.bat can fail on locked-down machines (it shells out to reg.exe) and
+rem leave INCLUDE set to something unusable. Only trust it if the Windows SDK
+rem headers are actually reachable. (Keep these statements out of any if/for
+rem block: %VAR% inside a block is expanded before the block runs.)
+set "VCVARS_OK="
+if not defined INCLUDE goto :manual_toolchain
+for %%i in ("%INCLUDE:;=" "%") do if exist "%%~i\windows.h" set "VCVARS_OK=1"
+if defined VCVARS_OK goto :toolchain_ready
+
+:manual_toolchain
+echo [i] vcvars not usable - configuring the toolchain manually
+set "SDKROOT=%ProgramFiles(x86)%\Windows Kits\10"
+for /d %%d in ("%VSPATH%\VC\Tools\MSVC\*") do set "MSVC=%%d"
+for /d %%d in ("%SDKROOT%\Include\*") do set "SDKV=%%~nxd"
+if not defined MSVC (
+  echo [!] no MSVC toolset found under "%VSPATH%\VC\Tools\MSVC"
+  exit /b 1
+)
+if not defined SDKV (
+  echo [!] no Windows SDK found under "%SDKROOT%\Include"
+  exit /b 1
+)
+set "PATH=%MSVC%\bin\Hostx64\x64;%PATH%"
+set "INCLUDE=%MSVC%\include;%SDKROOT%\Include\%SDKV%\ucrt;%SDKROOT%\Include\%SDKV%\um;%SDKROOT%\Include\%SDKV%\shared;%SDKROOT%\Include\%SDKV%\winrt;%SDKROOT%\Include\%SDKV%\cppwinrt"
+set "LIB=%MSVC%\lib\x64;%SDKROOT%\Lib\%SDKV%\ucrt\x64;%SDKROOT%\Lib\%SDKV%\um\x64"
+
+:toolchain_ready
 if not exist bin mkdir bin
 
 taskkill /F /IM RightDial.exe >nul 2>&1

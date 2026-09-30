@@ -33,6 +33,19 @@ static int     s_capAllocW = 0, s_capAllocH = 0;
 static LARGE_INTEGER s_lastCap{};   // QPC of the last backdrop capture
 static LARGE_INTEGER s_qpf{};
 
+// Rendering a Direct2D frame plus UpdateLayeredWindow is cheap but far from
+// free. WheelUpdateHover / WheelSwitchPage are called from inside the
+// low-level mouse hook, which blocks the OS raw-input thread system-wide, so
+// they only record the new state and let the message loop do the drawing.
+static const UINT WM_WHEEL_RENDER = WM_APP + 20;
+static bool s_renderPending = false;
+
+static void RequestRender() {
+    if (!s_hwnd || s_renderPending) return;
+    s_renderPending = true;
+    PostMessageW(s_hwnd, WM_WHEEL_RENDER, 0, 0);
+}
+
 // area-average downsample for arbitrary ratios (backdropScale below 1)
 static void DownsampleArea(const uint8_t* src, int sw, int sh, uint8_t* dst, int dw, int dh) {
     if (!src || !dst || sw < 1 || sh < 1 || dw < 1 || dh < 1) return;
@@ -274,6 +287,10 @@ static bool ResolveWheelDark(const POINT& center, int sizePx) {
 
 LRESULT CALLBACK WheelWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
+    case WM_WHEEL_RENDER:
+        s_renderPending = false;
+        if (WheelIsOpen()) RenderNow();
+        return 0;
     case WM_TIMER:
         if (wp == 1) {
             bool needRender = false;
@@ -385,7 +402,7 @@ void WheelUpdateHover(POINT screenPt) {
         idx = -1;
     if (idx != s_hover) {
         s_hover = idx;
-        RenderNow();
+        RequestRender();
     }
 }
 
@@ -404,6 +421,6 @@ void WheelSwitchPage(int dir) {
     RebuildSlots();
     s_hover = -1;
     s_animT = 1.0f;
-    RenderNow();
+    RequestRender();
 }
 
