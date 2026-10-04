@@ -5,6 +5,7 @@
 #include "actions.h"
 #include "render.h"
 #include "hook.h"
+#include "lucide_icons.h"
 
 #include <commdlg.h>
 
@@ -192,6 +193,362 @@ static std::wstring PickImageDialog(HWND parent) {
     if (!GetOpenFileNameW(&ofn)) return L"";
     return file;
 }
+
+// ---------- Lucide icon-library picker ----------
+// Modal dialog with a search box and a scrollable icon grid over the
+// embedded Lucide set (src/lucide_icons.cpp). Applies "builtin:lucide:<name>".
+
+static const wchar_t* PICKER_GRID_CLASS = L"RightDialIconGrid";
+
+struct LucidePicker {
+    std::vector<int> idx;        // filtered indices into the Lucide table
+    std::wstring     query;
+    std::wstring*    out = nullptr;  // receives "builtin:lucide:<name>" on apply
+    int              sel = -1;   // index into idx, -1 = none
+    HWND             dlg = nullptr, grid = nullptr;
+    int              cellW = 68, cellH = 84, iconPx = 44;
+    int              cols = 8, rowsVis = 4, firstRow = 0, totalRows = 0;
+
+    void Metrics(HWND h) {
+        RECT rc;
+        GetClientRect(h, &rc);
+        cols = std::max(1, (((int)rc.right - (int)rc.left) - 6) / cellW);
+        rowsVis = std::max(1, (((int)rc.bottom - (int)rc.top) - 6) / cellH);
+    }
+};
+
+// rasterized-icon cache for the grid only; bounded so a full browse of the
+// 1744-icon set never balloons memory (render's IconCache is untouched)
+static std::unordered_map<std::string, HBITMAP> s_gridIcons;
+static HFONT s_gridFont = nullptr;
+
+static HBITMAP GridIcon(const char* name, int px) {
+    std::string key = name;
+    key += '|';
+    key += std::to_string(px);
+    auto it = s_gridIcons.find(key);
+    if (it != s_gridIcons.end()) return it->second;
+    if (s_gridIcons.size() > 600) {
+        for (auto& kv : s_gridIcons) if (kv.second) DeleteObject(kv.second);
+        s_gridIcons.clear();
+    }
+    HBITMAP hb = LucideIconDib(name, px, false);   // light ink: picker is on a light dialog
+    s_gridIcons[key] = hb;
+    return hb;
+}
+
+static void NormalizeQueryKey(const std::wstring& in, std::wstring& out) {
+    out.clear();
+    for (wchar_t c : in) {
+        if (c == L'-' || c == L'_' || c == L' ') continue;
+        out.push_back((wchar_t)towlower(c));
+    }
+}
+
+static void PickerSyncScrollbar(LucidePicker* pk) {
+    SCROLLINFO si = { sizeof(si), SIF_RANGE | SIF_PAGE | SIF_POS };
+    si.nMin = 0;
+    si.nMax = std::max(0, pk->totalRows - 1);
+    si.nPage = (UINT)pk->rowsVis;
+    si.nPos = pk->firstRow;
+    SetScrollInfo(pk->grid, SB_VERT, &si, TRUE);
+}
+
+static void PickerUpdateTexts(LucidePicker* pk) {
+    wchar_t buf[96];
+    int n = LucideIconCount();
+    if (pk->query.empty()) swprintf_s(buf, L"共 %d 个图标", n);
+    else                   swprintf_s(buf, L"匹配 %d / %d", (int)pk->idx.size(), n);
+    Static_SetText(GetDlgItem(pk->dlg, 1002), buf);
+    if (pk->sel >= 0 && pk->sel < (int)pk->idx.size()) {
+        const char* nm = LucideIconAt(pk->idx[pk->sel]).name;
+        swprintf_s(buf, L"已选择: %S", nm);
+    } else {
+        wcscpy_s(buf, L"(未选择)");
+    }
+    Static_SetText(GetDlgItem(pk->dlg, 1003), buf);
+    EnableWindow(GetDlgItem(pk->dlg, IDOK), pk->sel >= 0);
+}
+
+static void PickerApplyFilter(LucidePicker* pk) {
+    std::wstring qk;
+    NormalizeQueryKey(pk->query, qk);
+    pk->idx.clear();
+    int n = LucideIconCount();
+    for (int i = 0; i < n; i++) {
+        if (qk.empty()) { pk->idx.push_back(i); continue; }
+        std::wstring w = Utf8ToUtf16(LucideIconAt(i).name), k;
+        NormalizeQueryKey(w, k);
+        if (k.find(qk) != std::wstring::npos) pk->idx.push_back(i);
+    }
+    if (pk->sel >= (int)pk->idx.size()) pk->sel = -1;
+    pk->firstRow = 0;
+    pk->totalRows = pk->idx.empty() ? 0 : (int)((pk->idx.size() + pk->cols - 1) / pk->cols);
+    PickerSyncScrollbar(pk);
+    PickerUpdateTexts(pk);
+    InvalidateRect(pk->grid, nullptr, TRUE);
+}
+
+// keep the selected cell's row on screen
+static void PickerEnsureVisible(LucidePicker* pk) {
+    if (pk->sel < 0 || pk->sel >= (int)pk->idx.size() || pk->cols < 1) return;
+    int row = pk->sel / pk->cols;
+    if (row < pk->firstRow) pk->firstRow = row;
+    if (row >= pk->firstRow + pk->rowsVis) pk->firstRow = row - pk->rowsVis + 1;
+    PickerSyncScrollbar(pk);
+    InvalidateRect(pk->grid, nullptr, TRUE);
+}
+
+static void PaintPickerGrid(HWND h, LucidePicker* pk, HDC hdc) {
+    RECT rc;
+    GetClientRect(h, &rc);
+    HBRUSH bg = CreateSolidBrush(RGB(252, 253, 255));
+    FillRect(hdc, &rc, bg);
+    DeleteObject(bg);
+
+    if (pk->idx.empty()) {
+        SetTextColor(hdc, RGB(130, 138, 150));
+        SetBkMode(hdc, TRANSPARENT);
+        HFONT of = (HFONT)SelectObject(hdc, s_font);
+        DrawTextW(hdc, L"无匹配图标", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(hdc, of);
+        return;
+    }
+
+    int rowEnd = std::min(pk->totalRows, pk->firstRow + pk->rowsVis + 1);
+    for (int row = pk->firstRow; row < rowEnd; row++) {
+        for (int col = 0; col < pk->cols; col++) {
+            int i = row * pk->cols + col;
+            if (i >= (int)pk->idx.size()) break;
+            const LucideIcon& li = LucideIconAt(pk->idx[i]);
+            RECT cell = { col * pk->cellW, (row - pk->firstRow) * pk->cellH,
+                          col * pk->cellW + pk->cellW, (row - pk->firstRow) * pk->cellH + pk->cellH };
+            bool selected = (i == pk->sel);
+            if (selected) {
+                HBRUSH hl = CreateSolidBrush(RGB(61, 111, 180));
+                FillRect(hdc, &cell, hl);
+                DeleteObject(hl);
+            }
+            int icon = std::min(pk->iconPx, pk->cellW - 8);
+            int ix = cell.left + (pk->cellW - icon) / 2;
+            int iy = cell.top + 8;
+            if (HBITMAP hb = GridIcon(li.name, icon)) {
+                HDC mem = CreateCompatibleDC(hdc);
+                HGDIOBJ old = SelectObject(mem, hb);
+                BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+                AlphaBlend(hdc, ix, iy, icon, icon, mem, 0, 0, icon, icon, bf);
+                SelectObject(mem, old);
+                DeleteDC(mem);
+            }
+            wchar_t label[64];
+            MultiByteToWideChar(CP_UTF8, 0, li.name, -1, label, 64);
+            RECT lr = { cell.left + 2, iy + icon, cell.right - 2, cell.bottom };
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, selected ? RGB(255, 255, 255) : RGB(96, 106, 120));
+            HFONT of = (HFONT)SelectObject(hdc, s_gridFont);
+            DrawTextW(hdc, label, -1, &lr, DT_CENTER | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            SelectObject(hdc, of);
+        }
+    }
+}
+
+static LRESULT CALLBACK PickerGridProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    LucidePicker* pk = (LucidePicker*)GetWindowLongPtrW(h, GWLP_USERDATA);
+    if (!pk) return DefSubclassProc(h, m, wp, lp);
+    switch (m) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        PaintPickerGrid(h, pk, dc);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        SetFocus(h);
+        int col = (short)LOWORD(lp) / pk->cellW;
+        int row = (short)HIWORD(lp) / pk->cellH + pk->firstRow;
+        int i = row * pk->cols + col;
+        pk->sel = (col < pk->cols && i >= 0 && i < (int)pk->idx.size()) ? i : -1;
+        PickerUpdateTexts(pk);
+        InvalidateRect(h, nullptr, TRUE);
+        return 0;
+    }
+    case WM_LBUTTONDBLCLK: {
+        int col = (short)LOWORD(lp) / pk->cellW;
+        int row = (short)HIWORD(lp) / pk->cellH + pk->firstRow;
+        int i = row * pk->cols + col;
+        if (col < pk->cols && i >= 0 && i < (int)pk->idx.size()) {
+            pk->sel = i;
+            PickerUpdateTexts(pk);
+            InvalidateRect(h, nullptr, TRUE);
+            SendMessageW(pk->dlg, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED), (LPARAM)nullptr);
+        }
+        return 0;
+    }
+    case WM_KEYDOWN: {
+        int last = (int)pk->idx.size() - 1;
+        int move = 0;
+        switch (wp) {
+        case VK_LEFT:  move = -1; break;
+        case VK_RIGHT: move = 1; break;
+        case VK_UP:    move = -pk->cols; break;
+        case VK_DOWN:  move = pk->cols; break;
+        case VK_HOME:  pk->sel = 0; break;
+        case VK_END:   pk->sel = last; break;
+        case VK_PRIOR: move = -pk->cols * pk->rowsVis; break;
+        case VK_NEXT:  move = pk->cols * pk->rowsVis; break;
+        default: return 0;
+        }
+        if (wp == VK_LEFT || wp == VK_RIGHT || wp == VK_UP || wp == VK_DOWN || wp == VK_PRIOR || wp == VK_NEXT) {
+            if (pk->sel < 0) pk->sel = (move > 0) ? 0 : last;
+            else             pk->sel = std::min(std::max(0, pk->sel + move), last);
+        }
+        PickerEnsureVisible(pk);
+        PickerUpdateTexts(pk);
+        InvalidateRect(h, nullptr, TRUE);
+        return 0;
+    }
+    case WM_GETDLGCODE:
+        return DLGC_WANTARROWS;
+    case WM_VSCROLL: {
+        SCROLLINFO si = { sizeof(si), SIF_ALL };
+        GetScrollInfo(h, SB_VERT, &si);
+        int old = si.nPos;
+        switch (LOWORD(wp)) {
+        case SB_TOP:         si.nPos = si.nMin; break;
+        case SB_BOTTOM:      si.nPos = si.nMax; break;
+        case SB_LINEUP:      si.nPos--; break;
+        case SB_LINEDOWN:    si.nPos++; break;
+        case SB_PAGEUP:      si.nPos -= pk->rowsVis; break;
+        case SB_PAGEDOWN:    si.nPos += pk->rowsVis; break;
+        case SB_THUMBTRACK:
+        case SB_THUMBPOSITION: si.nPos = si.nTrackPos; break;
+        }
+        si.fMask = SIF_POS;
+        SetScrollInfo(h, SB_VERT, &si, TRUE);
+        GetScrollInfo(h, SB_VERT, &si);
+        pk->firstRow = si.nPos;
+        if (si.nPos != old)
+            InvalidateRect(h, nullptr, TRUE);
+        return 0;
+    }
+    case WM_MOUSEWHEEL: {
+        int lines = -(int)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * 3;
+        if (!lines) lines = GET_WHEEL_DELTA_WPARAM(wp) > 0 ? -1 : 1;
+        pk->firstRow = std::min(std::max(0, pk->firstRow + lines), std::max(0, pk->totalRows - pk->rowsVis));
+        PickerSyncScrollbar(pk);
+        InvalidateRect(h, nullptr, TRUE);
+        return 0;
+    }
+    }
+    return DefSubclassProc(h, m, wp, lp);
+}
+
+static INT_PTR CALLBACK LucidePickerProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    switch (m) {
+    case WM_INITDIALOG: {
+        static LucidePicker s_picker;   // modal dialog: one live instance
+        LucidePicker* pk = &s_picker;
+        *pk = LucidePicker{};           // reset state, keep defaults
+        pk->dlg = h;
+        pk->out = (std::wstring*)lp;
+        SetWindowLongPtrW(h, DWLP_USER, (LONG_PTR)pk);
+        WNDCLASSEXW tmp{};
+        if (!GetClassInfoExW(g_hInst, PICKER_GRID_CLASS, &tmp)) {
+            WNDCLASSEXW wc = { sizeof(wc) };
+            wc.lpfnWndProc = DefWindowProcW;
+            wc.hInstance = g_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.lpszClassName = PICKER_GRID_CLASS;
+            RegisterClassExW(&wc);
+        }
+        RECT r = { 10, 26, 370, 228 };
+        MapDialogRect(h, &r);
+        pk->grid = CreateWindowExW(WS_EX_CLIENTEDGE, PICKER_GRID_CLASS, L"",
+                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL,
+                                   r.left, r.top, r.right - r.left, r.bottom - r.top,
+                                   h, (HMENU)(INT_PTR)1004, g_hInst, nullptr);
+        SetWindowSubclass(pk->grid, PickerGridProc, 30, 0);
+        SetWindowLongPtrW(pk->grid, GWLP_USERDATA, (LONG_PTR)pk);
+        if (!s_gridFont) {
+            LOGFONTW lf = {};
+            lf.lfHeight = -11;
+            lf.lfWeight = FW_NORMAL;
+            lf.lfQuality = CLEARTYPE_QUALITY;
+            wcsncpy_s(lf.lfFaceName, L"Microsoft YaHei UI", _TRUNCATE);
+            s_gridFont = CreateFontIndirectW(&lf);
+        }
+        SendMessageW(pk->grid, WM_SETFONT, (WPARAM)s_font, TRUE);
+        pk->Metrics(pk->grid);
+
+        // preselect the current builtin:lucide:<name> if the slot has one
+        std::wstring* out = (std::wstring*)lp;
+        if (out && out->rfind(L"builtin:lucide:", 0) == 0) {
+            std::string nm = Utf16ToUtf8(out->substr(15));
+            const LucideIcon* li = LucideFindIcon(nm.c_str());
+            if (li) pk->sel = (int)(li - &LucideIconAt(0));
+        }
+        PickerApplyFilter(pk);
+        PickerEnsureVisible(pk);
+        SetFocus(GetDlgItem(h, 1001));
+        return FALSE;
+    }
+    case WM_COMMAND: {
+        WORD id = LOWORD(wp);
+        auto* pk = (LucidePicker*)GetWindowLongPtrW(h, DWLP_USER);
+        if (id == 1001 && GET_WM_COMMAND_CMD(wp, lp) == EN_CHANGE && pk) {
+            int n = GetWindowTextLengthW(GetDlgItem(h, 1001));
+            pk->query.resize(n + 1);
+            GetDlgItemTextW(h, 1001, &pk->query[0], n + 1);
+            pk->query.resize(n);
+            PickerApplyFilter(pk);
+            return TRUE;
+        }
+        if (id == IDOK && pk) {
+            if (pk->out && pk->sel >= 0 && pk->sel < (int)pk->idx.size())
+                *pk->out = std::wstring(L"builtin:lucide:") + Utf8ToUtf16(LucideIconAt(pk->idx[pk->sel]).name);
+            EndDialog(h, (pk->sel >= 0) ? 1 : 0);
+            return TRUE;
+        }
+        if (id == IDCANCEL) {
+            EndDialog(h, 0);
+            return TRUE;
+        }
+        break;
+    }
+    case WM_CLOSE:
+        EndDialog(h, 0);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// returns true and fills `source` with "builtin:lucide:<name>" on apply
+static bool PickLucideIcon(HWND parent, std::wstring& source) {
+    Tpl t;
+    t.S32(DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_CENTER);
+    t.S32(WS_EX_DLGMODALFRAME);
+    t.W(6);
+    t.W(0); t.W(0); t.W(380); t.W(252);
+    t.W(0); t.W(0);
+    t.Str(L"选择图标 - Lucide 图标库");
+    t.W(9); t.Str(L"Microsoft YaHei UI");
+    t.A();
+    const DWORD stTxt  = WS_CHILD | WS_VISIBLE;
+    const DWORD stEdit = WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL;
+    const DWORD stDef  = WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON;
+    const DWORD stBtn  = WS_CHILD | WS_VISIBLE | WS_TABSTOP;
+    t.Item(stTxt, 0, (WORD)-1, 10, 11, 26, 10, 0x82, L"搜索:");
+    t.Item(stEdit, WS_EX_CLIENTEDGE, 1001, 38, 9, 250, 13, 0x81, L"");
+    t.Item(stTxt, 0, 1002, 294, 11, 76, 10, 0x82, L"");
+    t.Item(stTxt, 0, 1003, 10, 230, 230, 10, 0x82, L"(未选择)");
+    t.Item(stDef, 0, IDOK, 252, 228, 58, 14, 0x80, L"使用");
+    t.Item(stBtn, 0, IDCANCEL, 316, 228, 54, 14, 0x80, L"取消");
+    INT_PTR res = DialogBoxIndirectParamW(g_hInst, (LPCDLGTEMPLATE)t.w.data(), parent,
+                                          LucidePickerProc, (LPARAM)&source);
+    return res == 1;
+}
+
 
 // ---------- painting helpers ----------
 
@@ -455,7 +812,8 @@ static void RefreshDetail() {
     s_noSync = true;
     bool has = !!s;
     HWND ctl[] = { P1Of(IDC_P1_TYPE), P1Of(IDC_P1_NAME), P1Of(IDC_P1_KEYS), P1Of(IDC_P1_KEYPRESET), P1Of(IDC_P1_TARGET),
-                   P1Of(IDC_P1_BRFILE), P1Of(IDC_P1_BRFOLDER), P1Of(IDC_P1_ICONPRESET), P1Of(IDC_P1_ICONIMG), P1Of(IDC_P1_ICONCLEAR) };
+                   P1Of(IDC_P1_BRFILE), P1Of(IDC_P1_BRFOLDER), P1Of(IDC_P1_ICONPRESET), P1Of(IDC_P1_ICONIMG), P1Of(IDC_P1_ICONCLEAR),
+                   P1Of(IDC_P1_ICONLIB) };
     for (HWND c : ctl) EnableWindow(c, has);
     if (s) {
         bool hot = s->type == SlotType::Hotkey;
@@ -1135,7 +1493,8 @@ static void BuildPanel1(HWND p) {
     Ctl(p, L"Button", L"🎨 常用图标…", BS_PUSHBUTTON | WS_TABSTOP, 0, 436, 238, 120, 28, IDC_P1_ICONPRESET);
     Ctl(p, L"Button", L"🖼 本地图片…", BS_PUSHBUTTON | WS_TABSTOP, 0, 564, 238, 120, 28, IDC_P1_ICONIMG);
     Ctl(p, L"Button", L"↺ 恢复默认",   BS_PUSHBUTTON | WS_TABSTOP, 0, 692, 238, 100, 28, IDC_P1_ICONCLEAR);
-    Ctl(p, L"Static", L"留空自动提取目标文件/程序高清图标；支持内置矢量图标，或自定义 png / jpg / ico / svg。", 0, 0, 436, 274, 430, 36, -1);
+    Ctl(p, L"Button", L"📚 图标库…",   BS_PUSHBUTTON | WS_TABSTOP, 0, 436, 272, 120, 28, IDC_P1_ICONLIB);
+    Ctl(p, L"Static", L"留空自动提取目标文件/程序高清图标；支持内置矢量图标，或自定义 png / jpg / ico / svg。", 0, 0, 436, 308, 430, 36, -1);
 }
 
 static void BuildPanel2(HWND p) {
@@ -1650,10 +2009,16 @@ static void OnCommand(HWND h, int id, int code, HWND ctl) {
             { 20, L"⌨️ 快捷键默认",       L"builtin:keys" },
         };
         for (const auto& item : items) AppendMenuW(menu, MF_STRING, item.id, item.label);
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, 21, L"📚 图标库… (Lucide 全集)");
         RECT rcBtn; GetWindowRect(ctl, &rcBtn);
         int cmd = TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD,
                                  rcBtn.left, rcBtn.bottom, 0, h, nullptr);
         DestroyMenu(menu);
+        if (cmd == 21) {   // open the searchable Lucide library picker
+            SendMessageW(h, WM_COMMAND, MAKEWPARAM(IDC_P1_ICONLIB, BN_CLICKED), (LPARAM)nullptr);
+            return;
+        }
         if (cmd >= 1 && cmd <= (int)(sizeof(items)/sizeof(items[0]))) {
             s->iconPath = items[cmd - 1].path;
             IconCache::I().Clear();
@@ -1683,6 +2048,19 @@ static void OnCommand(HWND h, int id, int code, HWND ctl) {
         InvalidateRect(P1Of(IDC_P1_ICONPREV), nullptr, TRUE);
         InvalidateRect(P2Of(IDC_P2_PREVIEW), nullptr, TRUE);
         SaveSoon();
+        return;
+    }
+    case IDC_P1_ICONLIB: {
+        Slot* s = CurSlot();
+        if (!s) return;
+        std::wstring cur = s->iconPath;
+        if (PickLucideIcon(h, cur)) {
+            s->iconPath = cur;
+            IconCache::I().Clear();
+            InvalidateRect(P1Of(IDC_P1_ICONPREV), nullptr, TRUE);
+            InvalidateRect(P2Of(IDC_P2_PREVIEW), nullptr, TRUE);
+            SaveSoon();
+        }
         return;
     }
 

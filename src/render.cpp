@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "render.h"
 #include "glass.h"
+#include "lucide_icons.h"
 
 #define NANOSVG_IMPLEMENTATION
 #include "nanosvg.h"
@@ -51,6 +52,8 @@ IDWriteTextFormat* GetTextFormat(const std::wstring& font, float sizePx, IDWrite
 }
 
 // ---------- builtin svg glyphs ----------
+
+static bool RasterizeSvgBuffer(std::vector<char>& buf, int sizePx, std::vector<uint8_t>& outPbgra);
 
 static const wchar_t* FindBuiltinSvg(const std::wstring& name) {
     static const struct { const wchar_t* n; const wchar_t* s; } k[] = {
@@ -142,6 +145,44 @@ static const wchar_t* FindBuiltinSvg(const std::wstring& name) {
     };
     for (auto& e : k) if (name == e.n) return e.s;
     return nullptr;
+}
+
+// Wrap the stored inner markup of a Lucide icon with the theme-appropriate
+// 24x24 stroke wrapper. Icon bodies keep "currentColor" verbatim where the
+// source files use it; it takes the theme ink like the wrapper stroke.
+static std::string LucideSvgString(const char* name, bool dark) {
+    const LucideIcon* li = LucideFindIcon(name);
+    if (!li) return {};
+    const char* ink = dark ? "#e8edf5" : "#242a35";
+    std::string s = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='";
+    s += ink;
+    s += "' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>";
+    s += li->body;
+    s += "</svg>";
+    for (size_t p; (p = s.find("currentColor")) != std::string::npos;)
+        s.replace(p, 12, ink);
+    return s;
+}
+
+HBITMAP LucideIconDib(const char* name, int sizePx, bool dark) {
+    std::string s8 = LucideSvgString(name, dark);
+    if (s8.empty()) return nullptr;
+    std::vector<char> buf(s8.begin(), s8.end());
+    buf.push_back('\0');
+    std::vector<uint8_t> px;
+    if (!RasterizeSvgBuffer(buf, sizePx, px)) return nullptr;
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = sizePx;
+    bi.bmiHeader.biHeight = -sizePx;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP hb = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!hb) return nullptr;
+    memcpy(bits, px.data(), px.size());
+    return hb;
 }
 
 // ---------- IconCache ----------
@@ -306,11 +347,14 @@ bool IconCache::GetWic(const std::wstring& source, int sizePx, bool dark, IWICBi
 
     if (source.rfind(L"builtin:", 0) == 0) {
         std::wstring name = source.substr(8);
-        if (const wchar_t* svg = FindBuiltinSvg(name)) {
-            std::wstring themed = ThemeBuiltinSvg(svg, dark);
-            std::vector<char> buf;
-            std::string s8 = Utf16ToUtf8(themed);
-            buf.assign(s8.begin(), s8.end());
+        std::string s8;
+        if (name.rfind(L"lucide:", 0) == 0) {
+            s8 = LucideSvgString(Utf16ToUtf8(name.substr(7)).c_str(), dark);
+        } else if (const wchar_t* svg = FindBuiltinSvg(name)) {
+            s8 = Utf16ToUtf8(ThemeBuiltinSvg(svg, dark));
+        }
+        if (!s8.empty()) {
+            std::vector<char> buf(s8.begin(), s8.end());
             buf.push_back('\0');
             std::vector<uint8_t> px;
             if (RasterizeSvgBuffer(buf, sizePx, px)) {

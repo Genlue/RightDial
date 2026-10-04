@@ -2,7 +2,7 @@
 
 轻量级 Windows 全局轮盘菜单：**按住鼠标右键拖动即可唤出**，可装载自定义组合快捷键（如 Ctrl+V）、文件/文件夹与网址，外观高度可自定义。
 
-- 单文件 `RightDial.exe` 约 **0.5 MB**，常驻**私有内存约 2 MB**（工作集约 10 MB 含共享 DLL），远低于 10 MB 目标
+- 单文件 `RightDial.exe` 约 **1.3 MB**（含内置 Lucide 图标库），常驻**私有内存约 2 MB**（工作集约 10 MB 含共享 DLL），远低于 10 MB 目标
 - 原生 Win32 + Direct2D 自绘，无任何运行时依赖（静态链接 CRT）
 
 ## 功能
@@ -38,6 +38,7 @@
 
 ### 图标
 - 默认自动提取目标文件/程序/文件夹自身的图标（Shell 官方接口）
+- **内置 Lucide 图标库（1744 枚）**：槽位设置点「📚 图标库…」打开选择器，支持按名称实时搜索（忽略大小写与 `-`/`_`）、方向键浏览、双击或「使用」应用；保存为 `builtin:lucide:<名称>`（如 `builtin:lucide:folder`），描边颜色随深/浅主题自动变色
 - 支持自定义替换：`png / jpg / jpeg / bmp / ico / svg`
 
 ### 后台行为
@@ -51,8 +52,8 @@
 
 | 文件 | 说明 |
 |---|---|
-| `bin/RightDial-1.0.3-setup.msi` | 安装版（MSI，中文安装向导，装到 Program Files，含开始菜单快捷方式） |
-| `bin/RightDial-1.0.3-portable.zip` | 便携版（解压即用，配置保存在 exe 同目录，附使用说明） |
+| `bin/RightDial-1.0.4-setup.msi` | 安装版（MSI，中文安装向导，装到 Program Files，含开始菜单快捷方式） |
+| `bin/RightDial-1.0.4-portable.zip` | 便携版（解压即用，配置保存在 exe 同目录，附使用说明） |
 
 安装版与便携版的行为差异仅在配置文件位置：
 - 安装版：`%APPDATA%\RightDial\config.json`
@@ -68,11 +69,11 @@ RightDial.exe /testwheel  在屏幕中央显示一次轮盘（诊断用）
 
 ## 构建方法
 
-依赖：VS 2022 Build Tools（含 VC++ 工具集与 Windows SDK）。第三方库（nanosvg、nlohmann/json）以单头文件形式放在 `third_party/`。
+依赖：VS 2022 Build Tools（含 VC++ 工具集与 Windows SDK）。第三方库（nanosvg、nlohmann/json）以单头文件形式放在 `third_party/`。内置图标数据 `src/lucide_icons.cpp` 由 `tools/gen_lucide.py` 生成（仅更新图标集时需要 Python，日常构建不需要）。
 
 ```bat
 build.cmd        :: 编译 bin\RightDial.exe（cl /O1 /MT）
-build-msi.cmd    :: 生成 bin\RightDial-1.0.3-setup.msi（WiX 5，dotnet tool install --global wix --version 5.0.2）
+build-msi.cmd    :: 生成 bin\RightDial-1.0.4-setup.msi（WiX 5，dotnet tool install --global wix --version 5.0.2）
 build-hooklat.cmd :: 编译 bin\hooklat.exe（低层钩子延迟回归探针，见下）
 ```
 
@@ -107,7 +108,7 @@ bin\hooklat.exe -mode 1     :: 延后补发     —— 修复后，约 0.013 ms
 ## 目录结构
 
 ```
-src/           C++ 源码（main / hook / wheel / render / glass / glass_gpu / actions / config / settings / tray / util）
+src/           C++ 源码（main / hook / wheel / render / glass / glass_gpu / actions / config / settings / tray / util；lucide_icons.cpp 为生成文件）
 third_party/   nanosvg（SVG 渲染）、nlohmann/json（配置读写），均为单头文件
 assets/        程序图标生成脚本与 .ico
 installer/     WiX 打包定义
@@ -139,7 +140,7 @@ dist/          便携版打包目录
   ]
 }
 ```
-`type`：0=快捷键，1=文件/文件夹，2=网址；`icon` 填图片路径可自定义图标，留空自动提取。
+`type`：0=快捷键，1=文件/文件夹，2=网址；`icon` 可填图片路径、`builtin:lucide:<名称>`（内置 Lucide 图标库）或 `builtin:<名称>`（少量传统内置图标），留空自动提取。
 
 ## 已知限制
 
@@ -150,6 +151,6 @@ dist/          便携版打包目录
 
 ## 许可
 
-自研代码无限制使用；第三方库遵循其原始许可（nanosvg — zlib/MIT 风格，nlohmann/json — MIT）。
+自研代码无限制使用；第三方内容遵循其原始许可（nanosvg — zlib/MIT 风格，nlohmann/json — MIT，[Lucide 图标](https://lucide.dev) — ISC，许可全文见 `src/lucide_icons.cpp` 头部）。
 
 液态玻璃（bgMode 2）的折射/色散/鲜活度算法移植自 [Kyant0/AndroidLiquidGlass](https://github.com/Kyant0/AndroidLiquidGlass)（Apache License 2.0，Copyright 2025 Kyant），实现见 `src/glass.cpp` 头部说明。

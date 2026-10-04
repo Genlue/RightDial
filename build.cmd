@@ -53,7 +53,7 @@ if errorlevel 1 (
 cl /nologo /std:c++20 /utf-8 /O1 /MT /EHsc /W3 /DNDEBUG /DUNICODE /D_UNICODE ^
   /I third_party /I third_party\nanosvg ^
   /Fobin/ /Febin/RightDial.exe ^
-  src\util.cpp src\config.cpp src\render.cpp src\glass.cpp src\glass_gpu.cpp src\actions.cpp src\hook.cpp src\wheel.cpp src\tray.cpp src\settings.cpp src\main.cpp ^
+  src\util.cpp src\config.cpp src\render.cpp src\lucide_icons.cpp src\glass.cpp src\glass_gpu.cpp src\actions.cpp src\hook.cpp src\wheel.cpp src\tray.cpp src\settings.cpp src\main.cpp ^
   bin\app.res ^
   /link /SUBSYSTEM:WINDOWS ^
   user32.lib gdi32.lib d2d1.lib dwrite.lib windowscodecs.lib shell32.lib shlwapi.lib advapi32.lib ^

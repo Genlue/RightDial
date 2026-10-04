@@ -13,9 +13,9 @@ if not exist bin\RightDial.exe (
   exit /b 1
 )
 
-"%WIX%" build -arch x64 -culture zh-cn -ext WixToolset.UI.wixext -out bin\RightDial-1.0.3-setup.msi installer\product.wxs
+"%WIX%" build -arch x64 -culture zh-cn -ext WixToolset.UI.wixext -out bin\RightDial-1.0.4-setup.msi installer\product.wxs
 if errorlevel 1 (
   echo [!] msi build failed
   exit /b 1
 )
-echo OK: bin\RightDial-1.0.3-setup.msi
+echo OK: bin\RightDial-1.0.4-setup.msi

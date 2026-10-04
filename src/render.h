@@ -93,3 +93,8 @@ private:
 };
 
 IDWriteTextFormat* GetTextFormat(const std::wstring& font, float sizePx, IDWriteFactory* dw);
+
+// Rasterize an icon from the embedded Lucide set at sizePx (theme ink picked
+// by `dark`) into a 32bpp top-down premultiplied DIB; caller must DeleteObject.
+// Null for unknown names. Used by the settings icon-library picker.
+HBITMAP LucideIconDib(const char* name, int sizePx, bool dark);
