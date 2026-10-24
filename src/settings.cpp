@@ -11,12 +11,99 @@
 
 static HWND s_hwnd = nullptr;
 static UINT s_dpi = 96;
-static HFONT s_font = nullptr;
-static HWND s_tab = nullptr, s_panel1 = nullptr, s_panel2 = nullptr, s_panel3 = nullptr;
+static HFONT s_font = nullptr;          // body text
+static HFONT s_fontBold = nullptr;      // dialog-critical emphasis
+static HFONT s_fontSection = nullptr;   // dim section headings
+static HFONT s_fontTitle = nullptr;     // sidebar app title
+static HWND s_nav = nullptr;
+static HWND s_panel1 = nullptr, s_panel2 = nullptr, s_panel3 = nullptr;
+static HWND s_footHint = nullptr;
 static int  s_curPage = 0, s_curSlot = -1;
+static int  s_navSel = 0;               // active nav row (was: tab index)
 static bool s_noSync = false;   // suppress EN_CHANGE while loading values into controls
 
 static const wchar_t* MAIN_CLASS = L"RightDialSettings";
+static const wchar_t* NAV_CLASS  = L"RightDialNav";
+
+// ---------- UI theme: one quiet palette per system appearance ----------
+// Golden Gate translation for Win32: system chrome (titlebar, menus, control
+// internals) follows the OS dark mode; the sidebar sits on a slightly quieter
+// fill than content; the content plane stays plain in both modes.
+
+static bool s_dark = false;
+static COLORREF s_accent = RGB(61, 111, 180);
+
+struct UiTheme {
+    COLORREF sidebar, sidebarText, sidebarDim, sep;
+    COLORREF content, text, textDim, control, controlBorder, editText;
+};
+static UiTheme UiThemeNow() {
+    if (s_dark) return {
+        RGB(32, 35, 41),    RGB(236, 240, 245), RGB(146, 154, 165), RGB(52, 56, 63),
+        RGB(43, 46, 52),    RGB(233, 236, 241), RGB(158, 165, 176), RGB(56, 60, 66),
+        RGB(70, 75, 82),    RGB(233, 236, 241),
+    };
+    return {
+        RGB(242, 244, 248), RGB(26, 32, 44),    RGB(122, 131, 145), RGB(222, 226, 233),
+        RGB(252, 253, 254), RGB(26, 32, 44),    RGB(122, 131, 145), RGB(255, 255, 255),
+        RGB(213, 219, 227), RGB(26, 32, 44),
+    };
+}
+static COLORREF BlendC(COLORREF a, COLORREF b, float t) {
+    auto ch = [&](int x, int y) { int v = (int)(x + (y - x) * t + 0.5f); return std::min(255, std::max(0, v)); };
+    return RGB(ch(GetRValue(a), GetRValue(b)), ch(GetGValue(a), GetGValue(b)), ch(GetBValue(a), GetBValue(b)));
+}
+static COLORREF AccentTint(COLORREF base) {   // quiet accent-tinted selection fill
+    return BlendC(base, s_accent, s_dark ? 0.20f : 0.14f);
+}
+
+struct UiBrushes { HBRUSH content = nullptr, sidebar = nullptr, control = nullptr; };
+static UiBrushes s_br;
+static void RebuildBrushes() {
+    if (s_br.content) DeleteObject(s_br.content);
+    if (s_br.sidebar) DeleteObject(s_br.sidebar);
+    if (s_br.control) DeleteObject(s_br.control);
+    UiTheme t = UiThemeNow();
+    s_br.content = CreateSolidBrush(t.content);
+    s_br.sidebar = CreateSolidBrush(t.sidebar);
+    s_br.control = CreateSolidBrush(t.control);
+}
+
+// rasterized-icon caches (declared here so theme flips can drop them)
+static std::unordered_map<std::string, HBITMAP> s_gridIcons;   // Lucide picker grid
+static std::unordered_map<std::string, HBITMAP> s_navIconCache; // sidebar nav icons
+
+static void ApplyDarkToTree(HWND h) {
+    UxAllowDarkForWindow(h, s_dark);
+    for (HWND c = GetWindow(h, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) ApplyDarkToTree(c);
+}
+
+// resolve the system theme (env override RIGHTDIAL_UI_DARK=0/1 is a test hook)
+// and, when it flips, re-skin the live window tree
+static void ResolveUITheme(bool force = false) {
+    bool dark;
+    const char* ovr = getenv("RIGHTDIAL_UI_DARK");
+    if (ovr && (*ovr == '0' || *ovr == '1')) dark = *ovr == '1';
+    else dark = (SystemAppTheme() == 0);
+    std::wstring ac = SystemAccentHex();
+    if (!ac.empty()) {
+        D2D1_COLOR_F c = ParseColor(ac);
+        s_accent = RGB((int)(c.r * 255), (int)(c.g * 255), (int)(c.b * 255));
+    } else {
+        s_accent = RGB(61, 111, 180);
+    }
+    if (dark == s_dark && !force) return;
+    s_dark = dark;
+    RebuildBrushes();
+    for (auto& kv : s_gridIcons) if (kv.second) DeleteObject(kv.second);
+    s_gridIcons.clear();
+    s_navIconCache.clear();
+    if (s_hwnd) {
+        DwmDarkTitlebar(s_hwnd, s_dark);
+        ApplyDarkToTree(s_hwnd);
+        RedrawWindow(s_hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    }
+}
 
 static HWND CtrlOf(int id) { return GetDlgItem(s_hwnd, id); }
 static HWND P1Of(int id) { return GetDlgItem(s_panel1, id); }
@@ -63,11 +150,28 @@ static INT_PTR CALLBACK InputProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_INITDIALOG: {
         SetWindowLongPtrW(h, DWLP_USER, (LONG_PTR)lp);
+        DwmDarkTitlebar(h, s_dark);
+        ApplyDarkToTree(h);
         std::wstring* out = (std::wstring*)lp;
         if (out) SetDlgItemTextW(h, 100, out->c_str());
         SetFocus(GetDlgItem(h, 100));
         SendDlgItemMessageW(h, 100, EM_SETSEL, 0, -1);
         return FALSE;
+    }
+    case WM_CTLCOLORDLG:
+        return (INT_PTR)s_br.content;
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = (HDC)wp;
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, UiThemeNow().text);
+        return (INT_PTR)s_br.content;
+    }
+    case WM_CTLCOLOREDIT: {
+        HDC dc = (HDC)wp;
+        UiTheme t = UiThemeNow();
+        SetTextColor(dc, t.editText);
+        SetBkColor(dc, t.control);
+        return (INT_PTR)s_br.control;
     }
     case WM_COMMAND: {
         WORD id = LOWORD(wp);
@@ -219,20 +323,21 @@ struct LucidePicker {
 
 // rasterized-icon cache for the grid only; bounded so a full browse of the
 // 1744-icon set never balloons memory (render's IconCache is untouched)
-static std::unordered_map<std::string, HBITMAP> s_gridIcons;
+// (s_gridIcons lives with the theme block above)
 static HFONT s_gridFont = nullptr;
 
 static HBITMAP GridIcon(const char* name, int px) {
     std::string key = name;
     key += '|';
     key += std::to_string(px);
+    key += s_dark ? "|d" : "|l";
     auto it = s_gridIcons.find(key);
     if (it != s_gridIcons.end()) return it->second;
     if (s_gridIcons.size() > 600) {
         for (auto& kv : s_gridIcons) if (kv.second) DeleteObject(kv.second);
         s_gridIcons.clear();
     }
-    HBITMAP hb = LucideIconDib(name, px, false);   // light ink: picker is on a light dialog
+    HBITMAP hb = LucideIconDib(name, px, s_dark);   // ink follows the UI theme
     s_gridIcons[key] = hb;
     return hb;
 }
@@ -302,12 +407,11 @@ static void PickerEnsureVisible(LucidePicker* pk) {
 static void PaintPickerGrid(HWND h, LucidePicker* pk, HDC hdc) {
     RECT rc;
     GetClientRect(h, &rc);
-    HBRUSH bg = CreateSolidBrush(RGB(252, 253, 255));
-    FillRect(hdc, &rc, bg);
-    DeleteObject(bg);
+    UiTheme th = UiThemeNow();
+    FillRect(hdc, &rc, s_br.content);
 
     if (pk->idx.empty()) {
-        SetTextColor(hdc, RGB(130, 138, 150));
+        SetTextColor(hdc, th.textDim);
         SetBkMode(hdc, TRANSPARENT);
         HFONT of = (HFONT)SelectObject(hdc, s_font);
         DrawTextW(hdc, L"无匹配图标", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
@@ -325,7 +429,7 @@ static void PaintPickerGrid(HWND h, LucidePicker* pk, HDC hdc) {
                           col * pk->cellW + pk->cellW, (row - pk->firstRow) * pk->cellH + pk->cellH };
             bool selected = (i == pk->sel);
             if (selected) {
-                HBRUSH hl = CreateSolidBrush(RGB(61, 111, 180));
+                HBRUSH hl = CreateSolidBrush(s_accent);
                 FillRect(hdc, &cell, hl);
                 DeleteObject(hl);
             }
@@ -333,6 +437,8 @@ static void PaintPickerGrid(HWND h, LucidePicker* pk, HDC hdc) {
             int ix = cell.left + (pk->cellW - icon) / 2;
             int iy = cell.top + 8;
             if (HBITMAP hb = GridIcon(li.name, icon)) {
+                // on the accent selection fill, re-tint by drawing a dark chip is
+                // overkill; ink stays readable because the accent is mid-tone
                 HDC mem = CreateCompatibleDC(hdc);
                 HGDIOBJ old = SelectObject(mem, hb);
                 BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
@@ -344,7 +450,7 @@ static void PaintPickerGrid(HWND h, LucidePicker* pk, HDC hdc) {
             MultiByteToWideChar(CP_UTF8, 0, li.name, -1, label, 64);
             RECT lr = { cell.left + 2, iy + icon, cell.right - 2, cell.bottom };
             SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, selected ? RGB(255, 255, 255) : RGB(96, 106, 120));
+            SetTextColor(hdc, selected ? RGB(255, 255, 255) : th.textDim);
             HFONT of = (HFONT)SelectObject(hdc, s_gridFont);
             DrawTextW(hdc, label, -1, &lr, DT_CENTER | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
             SelectObject(hdc, of);
@@ -453,6 +559,7 @@ static INT_PTR CALLBACK LucidePickerProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         pk->dlg = h;
         pk->out = (std::wstring*)lp;
         SetWindowLongPtrW(h, DWLP_USER, (LONG_PTR)pk);
+        DwmDarkTitlebar(h, s_dark);
         WNDCLASSEXW tmp{};
         if (!GetClassInfoExW(g_hInst, PICKER_GRID_CLASS, &tmp)) {
             WNDCLASSEXW wc = { sizeof(wc) };
@@ -470,9 +577,10 @@ static INT_PTR CALLBACK LucidePickerProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                                    h, (HMENU)(INT_PTR)1004, g_hInst, nullptr);
         SetWindowSubclass(pk->grid, PickerGridProc, 30, 0);
         SetWindowLongPtrW(pk->grid, GWLP_USERDATA, (LONG_PTR)pk);
+        UxAllowDarkForWindow(pk->grid, s_dark);
         if (!s_gridFont) {
             LOGFONTW lf = {};
-            lf.lfHeight = -11;
+            lf.lfHeight = -S(9);
             lf.lfWeight = FW_NORMAL;
             lf.lfQuality = CLEARTYPE_QUALITY;
             wcsncpy_s(lf.lfFaceName, L"Microsoft YaHei UI", _TRUNCATE);
@@ -515,6 +623,21 @@ static INT_PTR CALLBACK LucidePickerProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             return TRUE;
         }
         break;
+    }
+    case WM_CTLCOLORDLG:
+        return (INT_PTR)s_br.content;
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = (HDC)wp;
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, UiThemeNow().text);
+        return (INT_PTR)s_br.content;
+    }
+    case WM_CTLCOLOREDIT: {
+        HDC dc = (HDC)wp;
+        UiTheme t = UiThemeNow();
+        SetTextColor(dc, t.editText);
+        SetBkColor(dc, t.control);
+        return (INT_PTR)s_br.control;
     }
     case WM_CLOSE:
         EndDialog(h, 0);
@@ -648,16 +771,16 @@ static void RenderPreview(HWND h, HDC dst) {
                         float dx = u - bl.x, dy = v - bl.y;
                         float dd = sqrtf(dx * dx + dy * dy) / bl.r;
                         float glow = std::max(0.0f, 1.0f - dd);
-                        r += bl.r8 * glow * 0.5f;
-                        g += bl.g8 * glow * 0.5f;
-                        b += bl.b8 * glow * 0.5f;
+                        r += bl.r8 * glow * 0.26f;
+                        g += bl.g8 * glow * 0.26f;
+                        b += bl.b8 * glow * 0.26f;
                     }
                     if (mode == 2) {
                         // diagonal waves + light bands give the lens something to bend
                         float wave = sinf((u * 5.0f + v * 3.5f) * kPiF);
-                        r += 20 * wave; g += 20 * wave; b += 22 * wave;
+                        r += 12 * wave; g += 12 * wave; b += 14 * wave;
                         float band = sinf((u * 14.0f - v * 2.0f) * kPiF);
-                        if (band > 0.86f) { r += 70; g += 72; b += 74; }
+                        if (band > 0.86f) { r += 56; g += 58; b += 60; }
                     }
                     size_t i = ((size_t)y * w + x) * 4;
                     fake[i] = (uint8_t)std::min(255.0f, b);
@@ -681,12 +804,6 @@ static void RenderPreview(HWND h, HDC dst) {
     surf.Render(st, pad);
     BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
     AlphaBlend(dst, 0, 0, w, hgt, surf.MemDC(), 0, 0, w, hgt, bf);
-
-    // subtle watermark hint in top-left
-    SetBkMode(dst, TRANSPARENT);
-    SetTextColor(dst, dark ? RGB(110, 125, 145) : RGB(122, 136, 155));
-    if (s_font) SelectObject(dst, s_font);
-    TextOutW(dst, 14, 10, L"🎨 轮盘实时预览画布", 10);
 }
 
 static LRESULT CALLBACK PreviewProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
@@ -709,8 +826,7 @@ static LRESULT CALLBACK PanelProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR
         HDC dc = (HDC)wp;
         RECT rc;
         GetClientRect(h, &rc);
-        static HBRUSH s_bgBr = CreateSolidBrush(RGB(246, 248, 250));
-        FillRect(dc, &rc, s_bgBr);
+        FillRect(dc, &rc, s_br.content);
         return 1;
     }
     case WM_COMMAND:
@@ -720,6 +836,7 @@ static LRESULT CALLBACK PanelProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLORBTN:
     case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
         return SendMessageW(s_hwnd, m, wp, lp);
     }
     return DefSubclassProc(h, m, wp, lp);
@@ -1220,7 +1337,10 @@ static HWND Ctl(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD styl
                 int x, int y, int w, int h, int id) {
     HWND c = CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style,
                              S(x), S(y), S(w), S(h), parent, (HMENU)(INT_PTR)id, g_hInst, nullptr);
-    if (s_font) SendMessageW(c, WM_SETFONT, (WPARAM)s_font, TRUE);
+    if (c) {
+        if (s_font) SendMessageW(c, WM_SETFONT, (WPARAM)s_font, TRUE);
+        UxAllowDarkForWindow(c, s_dark);   // let themed controls render with the OS theme
+    }
     return c;
 }
 
@@ -1243,6 +1363,159 @@ static void AddSliderWithEdit(HWND p, int id, int titleX, int titleY, int titleW
     if (unitText && *unitText) {
         Ctl(p, L"Static", unitText, 0, 0, unitX, unitY, unitW, 18, -1);
     }
+}
+
+// dim semibold section heading (replaces group boxes: grouping by typography
+// and spacing, no enclosing frame)
+static HWND Section(HWND p, const wchar_t* text, int x, int y, int w) {
+    HWND h = Ctl(p, L"Static", text, 0, 0, x, y, w, 20, -1);
+    if (s_fontSection) SendMessageW(h, WM_SETFONT, (WPARAM)s_fontSection, TRUE);
+    return h;
+}
+
+// ---------- sidebar navigation (replaces the top tab strip) ----------
+
+static void SwitchTab(int idx);   // defined with the panels below
+
+struct NavItem { const char* lucide; const wchar_t* label; };
+static const NavItem kNavItems[] = {
+    { "layout-grid", L"槽位与动作" },
+    { "palette",     L"轮盘外观" },
+    { "shield",      L"行为与规则" },
+};
+static int s_navHover = -1;
+
+static int NavPad() { return S(14); }
+static int NavItemTop(int i) { return S(78) + i * S(40); }
+static RECT NavItemRect(int i) {
+    int x = NavPad(), y = NavItemTop(i);
+    RECT r = { x, y, 0, y + S(34) };
+    r.right = s_nav ? (S(200) - NavPad()) : (x + S(158));
+    if (s_nav) {
+        RECT rc;
+        GetClientRect(s_nav, &rc);
+        r.right = rc.right - NavPad();
+    }
+    return r;
+}
+
+static HBITMAP NavIcon(int i, int px) {
+    std::string key = kNavItems[i].lucide;
+    key += s_dark ? "|d" : "|l";
+    key += std::to_string(px);
+    auto it = s_navIconCache.find(key);
+    if (it != s_navIconCache.end()) return it->second;
+    HBITMAP hb = LucideIconDib(kNavItems[i].lucide, px, s_dark);
+    s_navIconCache[key] = hb;
+    return hb;
+}
+
+static void FillRound(HDC dc, const RECT& r, COLORREF c, int rad) {
+    HBRUSH br = CreateSolidBrush(c);
+    HPEN pen = CreatePen(PS_NULL, 0, 0);
+    HGDIOBJ ob = SelectObject(dc, br), op = SelectObject(dc, pen);
+    RoundRect(dc, r.left, r.top, r.right, r.bottom, rad, rad);
+    SelectObject(dc, op);
+    SelectObject(dc, ob);
+    DeleteObject(pen);
+    DeleteObject(br);
+}
+
+static LRESULT CALLBACK NavProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    switch (m) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        RECT rc;
+        GetClientRect(h, &rc);
+        UiTheme th = UiThemeNow();
+        FillRect(dc, &rc, s_br.sidebar);
+
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, th.sidebarText);
+        HFONT of = (HFONT)SelectObject(dc, s_fontTitle);
+        TextOutW(dc, NavPad() + S(2), S(18), L"RightDial", 8);
+        SelectObject(dc, s_font);
+        SetTextColor(dc, th.sidebarDim);
+        TextOutW(dc, NavPad() + S(2), S(44), L"设置中心", 4);
+
+        int iconPx = S(20);
+        for (int i = 0; i < 3; i++) {
+            RECT item = NavItemRect(i);
+            if (i == s_navSel)          FillRound(dc, item, AccentTint(th.sidebar), S(7));
+            else if (i == s_navHover)   FillRound(dc, item, BlendC(th.sidebar, th.sidebarText, 0.06f), S(7));
+            if (HBITMAP hb = NavIcon(i, iconPx)) {
+                int iy = item.top + ((item.bottom - item.top) - iconPx) / 2;
+                HDC mem = CreateCompatibleDC(dc);
+                HGDIOBJ old = SelectObject(mem, hb);
+                BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+                AlphaBlend(dc, item.left + S(10), iy, iconPx, iconPx, mem, 0, 0, iconPx, iconPx, bf);
+                SelectObject(mem, old);
+                DeleteDC(mem);
+            }
+            SelectObject(dc, (i == s_navSel) ? s_fontBold : s_font);
+            SetTextColor(dc, th.sidebarText);
+            RECT tr = { item.left + S(42), item.top, item.right - S(4), item.bottom };
+            DrawTextW(dc, kNavItems[i].label, -1, &tr, DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+        SelectObject(dc, of);
+
+        // pane boundary hairline
+        HPEN pen = CreatePen(PS_SOLID, 1, th.sep);
+        HGDIOBJ op = SelectObject(dc, pen);
+        MoveToEx(dc, rc.right - 1, rc.top, nullptr);
+        LineTo(dc, rc.right - 1, rc.bottom);
+        SelectObject(dc, op);
+        DeleteObject(pen);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        POINTS pts = MAKEPOINTS(lp);
+        POINT pt{ pts.x, pts.y };
+        for (int i = 0; i < 3; i++) {
+            RECT r = NavItemRect(i);
+            if (PtInRect(&r, pt)) {
+                SetFocus(h);
+                SwitchTab(i);
+                return 0;
+            }
+        }
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        POINTS pts = MAKEPOINTS(lp);
+        POINT pt{ pts.x, pts.y };
+        int hover = -1;
+        for (int i = 0; i < 3; i++) {
+            RECT r = NavItemRect(i);
+            if (PtInRect(&r, pt)) hover = i;
+        }
+        if (hover != s_navHover) {
+            s_navHover = hover;
+            InvalidateRect(h, nullptr, FALSE);
+            TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, h, 0 };
+            TrackMouseEvent(&tme);
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        s_navHover = -1;
+        InvalidateRect(h, nullptr, FALSE);
+        return 0;
+    case WM_KEYDOWN:
+        if (wp == VK_UP || wp == VK_DOWN || wp == VK_LEFT || wp == VK_RIGHT) {
+            int d = (wp == VK_DOWN || wp == VK_RIGHT) ? 1 : -1;
+            SwitchTab(std::min(std::max(0, s_navSel + d), 2));
+            return 0;
+        }
+        break;
+    case WM_GETDLGCODE:
+        return DLGC_WANTARROWS;
+    }
+    return DefWindowProcW(h, m, wp, lp);
 }
 
 // ---------- wheel view: visual slot order editor ----------
@@ -1445,200 +1718,234 @@ static void AutofitButtons(HWND panel) {
 }
 
 static void BuildPanel1(HWND p) {
-    Ctl(p, L"Static", L"页面列表", 0, 0, 10, 8, 80, 18, -1);
-    Ctl(p, WC_LISTBOXW, L"", LBS_NOTIFY | LBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 10, 28, 140, 240, IDC_P1_PAGES);
-    Ctl(p, L"Button", L"+ 添加页", BS_PUSHBUTTON | WS_TABSTOP, 0, 10, 274, 68, 26, IDC_P1_ADDPAGE);
-    Ctl(p, L"Button", L"重命名", BS_PUSHBUTTON | WS_TABSTOP, 0, 82, 274, 68, 26, IDC_P1_RENPAGE);
-    Ctl(p, L"Button", L"删除页", BS_PUSHBUTTON | WS_TABSTOP, 0, 10, 304, 140, 26, IDC_P1_DELPAGE);
+    // four columns on one shared grid: pages | slots | wheel order | inspector
+    Section(p, L"页面", 16, 16, 140);
+    Section(p, L"槽位", 172, 16, 148);
+    Section(p, L"轮盘顺序（拖动换位）", 340, 16, 150);
+    Section(p, L"槽位设置", 502, 16, 362);
 
-    Ctl(p, L"Static", L"当前页槽位", 0, 0, 164, 8, 120, 18, -1);
-    Ctl(p, WC_LISTBOXW, L"", LBS_NOTIFY | LBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 164, 28, 150, 300, IDC_P1_SLOTS);
-
-    Ctl(p, L"Static", L"轮盘位置 (拖动图标换位)", 0, 0, 164, 336, 150, 18, -1);
-    Ctl(p, L"Static", L"", SS_NOTIFY, WS_EX_CLIENTEDGE, 164, 356, 150, 130, IDC_P1_WHEELVIEW);
+    Ctl(p, WC_LISTBOXW, L"", LBS_NOTIFY | LBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 44, 140, 232, IDC_P1_PAGES);
+    Ctl(p, WC_LISTBOXW, L"", LBS_NOTIFY | LBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 172, 44, 148, 300, IDC_P1_SLOTS);
+    Ctl(p, L"Static", L"", SS_NOTIFY, 0, 340, 44, 150, 150, IDC_P1_WHEELVIEW);
     SetWindowSubclass(GetDlgItem(p, IDC_P1_WHEELVIEW), WheelViewProc, 21, 0);
 
-    Ctl(p, L"Button", L"+ 插入槽位", BS_PUSHBUTTON | WS_TABSTOP, 0, 164, 492, 72, 26, IDC_P1_ADDSLOT);
-    Ctl(p, L"Button", L"删除",     BS_PUSHBUTTON | WS_TABSTOP, 0, 242, 492, 72, 26, IDC_P1_DELSLOT);
-    Ctl(p, L"Button", L"↑ 上移",     BS_PUSHBUTTON | WS_TABSTOP, 0, 164, 522, 72, 26, IDC_P1_UPSLOT);
-    Ctl(p, L"Button", L"↓ 下移",     BS_PUSHBUTTON | WS_TABSTOP, 0, 242, 522, 72, 26, IDC_P1_DOWNSLOT);
+    Ctl(p, L"Button", L"添加页", BS_PUSHBUTTON | WS_TABSTOP, 0, 16, 284, 66, 26, IDC_P1_ADDPAGE);
+    Ctl(p, L"Button", L"重命名", BS_PUSHBUTTON | WS_TABSTOP, 0, 88, 284, 68, 26, IDC_P1_RENPAGE);
+    Ctl(p, L"Button", L"删除页", BS_PUSHBUTTON | WS_TABSTOP, 0, 16, 316, 138, 26, IDC_P1_DELPAGE);
 
-    Ctl(p, L"Button", L"槽位属性详情设置", BS_GROUPBOX, 0, 330, 8, 560, 502, -1);
+    Ctl(p, L"Button", L"插入槽位", BS_PUSHBUTTON | WS_TABSTOP, 0, 340, 204, 70, 26, IDC_P1_ADDSLOT);
+    Ctl(p, L"Button", L"删除",     BS_PUSHBUTTON | WS_TABSTOP, 0, 416, 204, 74, 26, IDC_P1_DELSLOT);
+    Ctl(p, L"Button", L"上移",     BS_PUSHBUTTON | WS_TABSTOP, 0, 340, 236, 70, 26, IDC_P1_UPSLOT);
+    Ctl(p, L"Button", L"下移",     BS_PUSHBUTTON | WS_TABSTOP, 0, 416, 236, 74, 26, IDC_P1_DOWNSLOT);
 
-    Ctl(p, L"Static", L"动作类型", 0, 0, 350, 36, 70, 18, -1);
-    HWND type = Ctl(p, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0, 430, 32, 200, 200, IDC_P1_TYPE);
+    // inspector: label column at 502 (w 64), controls at 570, row pitch 36
+    Ctl(p, L"Static", L"动作类型", 0, 0, 502, 50, 64, 18, -1);
+    HWND type = Ctl(p, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0, 570, 46, 182, 200, IDC_P1_TYPE);
     ComboBox_AddString(type, L"发送快捷键");
     ComboBox_AddString(type, L"打开文件 / 文件夹");
     ComboBox_AddString(type, L"打开网址");
 
-    Ctl(p, L"Static", L"显示名称", 0, 0, 350, 74, 70, 18, -1);
-    Ctl(p, WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 430, 70, 320, 26, IDC_P1_NAME);
+    Ctl(p, L"Static", L"显示名称", 0, 0, 502, 86, 64, 18, -1);
+    Ctl(p, WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 570, 82, 288, 26, IDC_P1_NAME);
 
-    Ctl(p, L"Static", L"快捷键", 0, 0, 350, 112, 70, 18, IDC_P1_KEYS_L);
-    Ctl(p, WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 430, 108, 128, 26, IDC_P1_KEYS);
-    Ctl(p, L"Button", L"⚡ 常用预设…", BS_PUSHBUTTON | WS_TABSTOP, 0, 562, 108, 102, 26, IDC_P1_KEYPRESET);
-    Ctl(p, L"Button", L"Win",   BS_AUTOCHECKBOX | WS_TABSTOP, 0, 672, 111, 48, 20, IDC_P1_MODWIN);
-    Ctl(p, L"Button", L"Ctrl",  BS_AUTOCHECKBOX | WS_TABSTOP, 0, 722, 111, 52, 20, IDC_P1_MODCTRL);
-    Ctl(p, L"Button", L"Alt",   BS_AUTOCHECKBOX | WS_TABSTOP, 0, 776, 111, 48, 20, IDC_P1_MODALT);
-    Ctl(p, L"Button", L"Shift", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 826, 111, 56, 20, IDC_P1_MODSHIFT);
-    Ctl(p, L"Static", L"💡 录入方式：可在输入框中直接打字输入（如 Ctrl+Shift+Esc、Win+Shift+S、Ctrl+Alt+A、F5），或勾选修饰键/点击“⚡ 常用预设…”。", 0, 0, 350, 140, 530, 18, IDC_P1_KEYS_HINT);
+    Ctl(p, L"Static", L"快捷键", 0, 0, 502, 122, 64, 18, IDC_P1_KEYS_L);
+    Ctl(p, WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 570, 118, 144, 26, IDC_P1_KEYS);
+    Ctl(p, L"Button", L"常用预设…", BS_PUSHBUTTON | WS_TABSTOP, 0, 722, 118, 96, 26, IDC_P1_KEYPRESET);
+    Ctl(p, L"Button", L"Win",   BS_AUTOCHECKBOX | WS_TABSTOP, 0, 570, 156, 46, 20, IDC_P1_MODWIN);
+    Ctl(p, L"Button", L"Ctrl",  BS_AUTOCHECKBOX | WS_TABSTOP, 0, 622, 156, 50, 20, IDC_P1_MODCTRL);
+    Ctl(p, L"Button", L"Alt",   BS_AUTOCHECKBOX | WS_TABSTOP, 0, 678, 156, 46, 20, IDC_P1_MODALT);
+    Ctl(p, L"Button", L"Shift", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 730, 156, 52, 20, IDC_P1_MODSHIFT);
+    Ctl(p, L"Static", L"直接键入（如 Ctrl+Shift+Esc、F5），或勾选修饰键、点“常用预设…”", 0, 0, 570, 188, 292, 18, IDC_P1_KEYS_HINT);
 
-    Ctl(p, L"Static", L"目标路径", 0, 0, 350, 172, 70, 18, IDC_P1_TGT_L);
-    Ctl(p, WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 430, 168, 300, 26, IDC_P1_TARGET);
-    Ctl(p, L"Button", L"选文件…", BS_PUSHBUTTON | WS_TABSTOP, 0, 736, 168, 68, 26, IDC_P1_BRFILE);
-    Ctl(p, L"Button", L"选目录…", BS_PUSHBUTTON | WS_TABSTOP, 0, 808, 168, 68, 26, IDC_P1_BRFOLDER);
+    Ctl(p, L"Static", L"目标", 0, 0, 502, 228, 64, 18, IDC_P1_TGT_L);
+    Ctl(p, WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 570, 224, 288, 26, IDC_P1_TARGET);
+    Ctl(p, L"Button", L"选文件…", BS_PUSHBUTTON | WS_TABSTOP, 0, 570, 258, 86, 26, IDC_P1_BRFILE);
+    Ctl(p, L"Button", L"选目录…", BS_PUSHBUTTON | WS_TABSTOP, 0, 664, 258, 86, 26, IDC_P1_BRFOLDER);
 
-    Ctl(p, L"Static", L"槽位图标", 0, 0, 350, 212, 70, 18, -1);
-    Ctl(p, L"Static", L"", SS_OWNERDRAW, 0, 350, 236, 72, 72, IDC_P1_ICONPREV);
-    Ctl(p, L"Button", L"🎨 常用图标…", BS_PUSHBUTTON | WS_TABSTOP, 0, 436, 238, 120, 28, IDC_P1_ICONPRESET);
-    Ctl(p, L"Button", L"🖼 本地图片…", BS_PUSHBUTTON | WS_TABSTOP, 0, 564, 238, 120, 28, IDC_P1_ICONIMG);
-    Ctl(p, L"Button", L"↺ 恢复默认",   BS_PUSHBUTTON | WS_TABSTOP, 0, 692, 238, 100, 28, IDC_P1_ICONCLEAR);
-    Ctl(p, L"Button", L"📚 图标库…",   BS_PUSHBUTTON | WS_TABSTOP, 0, 436, 272, 120, 28, IDC_P1_ICONLIB);
-    Ctl(p, L"Static", L"留空自动提取目标文件/程序高清图标；支持内置矢量图标，或自定义 png / jpg / ico / svg。", 0, 0, 436, 308, 430, 36, -1);
+    Section(p, L"图标", 502, 300, 362);
+    Ctl(p, L"Static", L"", SS_OWNERDRAW, 0, 570, 328, 64, 64, IDC_P1_ICONPREV);
+    Ctl(p, L"Button", L"常用图标…", BS_PUSHBUTTON | WS_TABSTOP, 0, 642, 330, 104, 28, IDC_P1_ICONPRESET);
+    Ctl(p, L"Button", L"图标库…",   BS_PUSHBUTTON | WS_TABSTOP, 0, 752, 330, 104, 28, IDC_P1_ICONLIB);
+    Ctl(p, L"Button", L"本地图片…", BS_PUSHBUTTON | WS_TABSTOP, 0, 642, 362, 104, 28, IDC_P1_ICONIMG);
+    Ctl(p, L"Button", L"恢复默认",   BS_PUSHBUTTON | WS_TABSTOP, 0, 752, 362, 104, 28, IDC_P1_ICONCLEAR);
+    Ctl(p, L"Static", L"留空自动提取目标图标；支持内置矢量图标或自定义 png / jpg / ico / svg。", 0, 0, 502, 402, 362, 18, -1);
 }
 
 static void BuildPanel2(HWND p) {
-    Ctl(p, L"Static", L"", SS_NOTIFY, WS_EX_CLIENTEDGE, 10, 8, 880, 220, IDC_P2_PREVIEW);
+    // live preview canvas (a real object: framed preview of the wheel)
+    Ctl(p, L"Static", L"", SS_NOTIFY, 0, 16, 16, 848, 228, IDC_P2_PREVIEW);
     SetWindowSubclass(GetDlgItem(p, IDC_P2_PREVIEW), PreviewProc, 1, 0);
 
-    // Col 1: 尺寸与布局
-    Ctl(p, L"Button", L"布局与动画", BS_GROUPBOX, 0, 10, 236, 280, 246, -1);
-    AddSliderWithEdit(p, IDC_P2_SECTORS,  22, 262, 36, L"扇区", 60, 258, 125, 1, 36, 8,
-                      190, 259, 52, 22, 246, 262, 34, L"个");
-    AddSliderWithEdit(p, IDC_P2_ROTATION, 22, 294, 36, L"旋转", 60, 290, 125, 0, 360, 0,
-                      190, 291, 52, 22, 246, 294, 34, L"°");
-    AddSliderWithEdit(p, IDC_P2_DIAMETER, 22, 326, 36, L"直径", 60, 322, 125, 150, 600, 300,
-                      190, 323, 52, 22, 246, 326, 34, L"px");
-    AddSliderWithEdit(p, IDC_P2_ICONSIZE, 22, 358, 36, L"图标", 60, 354, 125, 16, 96, 46,
-                      190, 355, 52, 22, 246, 358, 34, L"px");
-    AddSliderWithEdit(p, IDC_P2_GAP,      22, 390, 36, L"间隙", 60, 386, 125, 0, 15, 2,
-                      190, 387, 52, 22, 246, 390, 34, L"°");
-    AddSliderWithEdit(p, IDC_P2_ANIMMS,   22, 422, 36, L"动画", 60, 418, 125, 0, 500, 130,
-                      190, 419, 52, 22, 246, 422, 34, L"ms");
+    // three columns on one row grid: same heading line, same 32px row pitch,
+    // same 64px label gutter and control start inside every column
+    Section(p, L"布局与动画", 16, 262, 272);
+    Section(p, L"材质与色彩", 312, 262, 272);
+    Section(p, L"文字与中心区", 608, 262, 272);
 
-    Ctl(p, L"Button", L"启用出现动画", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 22, 452, 120, 20, IDC_P2_ANIMCHK);
+    // Col 1: 布局与动画 — label@16 w64, slider@82 w120, edit@208 w46, unit@258
+    AddSliderWithEdit(p, IDC_P2_SECTORS,  16, 298, 64, L"扇区",     82, 294, 120, 1, 36, 8,
+                      208, 295, 46, 22, 258, 298, 28, L"个");
+    AddSliderWithEdit(p, IDC_P2_ROTATION, 16, 330, 64, L"旋转",     82, 326, 120, 0, 360, 0,
+                      208, 327, 46, 22, 258, 330, 28, L"°");
+    AddSliderWithEdit(p, IDC_P2_DIAMETER, 16, 362, 64, L"直径",     82, 358, 120, 150, 600, 300,
+                      208, 359, 46, 22, 258, 362, 28, L"px");
+    AddSliderWithEdit(p, IDC_P2_ICONSIZE, 16, 394, 64, L"图标",     82, 390, 120, 16, 96, 46,
+                      208, 391, 46, 22, 258, 394, 28, L"px");
+    AddSliderWithEdit(p, IDC_P2_GAP,      16, 426, 64, L"间隙",     82, 422, 120, 0, 15, 2,
+                      208, 423, 46, 22, 258, 426, 28, L"°");
+    Ctl(p, L"Button", L"启用出现动画", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 16, 458, 120, 20, IDC_P2_ANIMCHK);
+    AddSliderWithEdit(p, IDC_P2_ANIMMS,   16, 490, 64, L"动画时长", 82, 486, 120, 0, 500, 130,
+                      208, 487, 46, 22, 258, 490, 28, L"ms");
 
-    // Col 2: 材质与色彩
-    Ctl(p, L"Button", L"材质与色彩", BS_GROUPBOX, 0, 300, 236, 290, 246, -1);
-    Ctl(p, L"Static", L"背景模式", 0, 0, 314, 264, 60, 18, -1);
-    HWND bg = Ctl(p, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0, 380, 260, 194, 200, IDC_P2_BGMODE);
+    // Col 2: 材质与色彩 — label@312 w64, controls@378
+    Ctl(p, L"Static", L"背景模式", 0, 0, 312, 298, 64, 18, -1);
+    HWND bg = Ctl(p, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0, 378, 294, 190, 200, IDC_P2_BGMODE);
     ComboBox_AddString(bg, L"纯色半透明");
     ComboBox_AddString(bg, L"亚克力模糊 (毛玻璃)");
     ComboBox_AddString(bg, L"液态玻璃 (折射)");
 
-    Ctl(p, L"Static", L"色彩模式", 0, 0, 314, 296, 60, 18, -1);
-    HWND cmode = Ctl(p, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0, 380, 292, 194, 200, IDC_P2_COLORMODE);
+    Ctl(p, L"Static", L"色彩模式", 0, 0, 312, 330, 64, 18, -1);
+    HWND cmode = Ctl(p, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0, 378, 326, 190, 200, IDC_P2_COLORMODE);
     ComboBox_AddString(cmode, L"深色 (深底白字)");
     ComboBox_AddString(cmode, L"浅色 (浅底黑字)");
     ComboBox_AddString(cmode, L"自动 (按轮盘所在背景明暗)");
     ComboBox_AddString(cmode, L"跟随系统深浅模式");
 
-    AddSliderWithEdit(p, IDC_P2_BGOPACITY, 314, 328, 50, L"透明度", 366, 324, 125, 10, 100, 86,
-                      496, 325, 52, 22, 552, 328, 28, L"%");
-    AddSliderWithEdit(p, IDC_P2_BORDW,     314, 364, 50, L"边框粗细", 366, 360, 125, 0, 20, 3,
-                      496, 361, 52, 22, 552, 364, 28, L"px");
+    AddSliderWithEdit(p, IDC_P2_BGOPACITY, 312, 362, 64, L"透明度",   378, 358, 120, 10, 100, 86,
+                      504, 359, 46, 22, 554, 362, 28, L"%");
+    AddSliderWithEdit(p, IDC_P2_BORDW,     312, 394, 64, L"边框粗细", 378, 390, 120, 0, 20, 3,
+                      504, 391, 46, 22, 554, 394, 28, L"px");
 
-    Ctl(p, L"Static", L"深色", 0, 0, 314, 402, 34, 18, -1);
-    Ctl(p, L"Button", L"背景色", BS_PUSHBUTTON | WS_TABSTOP, 0, 352, 398, 54, 26, IDC_P2_BGCOLOR);
-    Ctl(p, L"Button", L"高亮色", BS_PUSHBUTTON | WS_TABSTOP, 0, 410, 398, 54, 26, IDC_P2_HOVERCOLOR);
-    Ctl(p, L"Button", L"边框色", BS_PUSHBUTTON | WS_TABSTOP, 0, 468, 398, 54, 26, IDC_P2_BORDCOLOR);
-    Ctl(p, L"Button", L"文字色", BS_PUSHBUTTON | WS_TABSTOP, 0, 526, 398, 54, 26, IDC_P2_TEXTCOLOR);
-    Ctl(p, L"Static", L"浅色", 0, 0, 314, 434, 34, 18, -1);
-    Ctl(p, L"Button", L"背景色", BS_PUSHBUTTON | WS_TABSTOP, 0, 352, 430, 54, 26, IDC_P2_BGCOLOR_L);
-    Ctl(p, L"Button", L"高亮色", BS_PUSHBUTTON | WS_TABSTOP, 0, 410, 430, 54, 26, IDC_P2_HOVERCOLOR_L);
-    Ctl(p, L"Button", L"边框色", BS_PUSHBUTTON | WS_TABSTOP, 0, 468, 430, 54, 26, IDC_P2_BORDCOLOR_L);
-    Ctl(p, L"Button", L"文字色", BS_PUSHBUTTON | WS_TABSTOP, 0, 526, 430, 54, 26, IDC_P2_TEXTCOLOR_L);
-    Ctl(p, L"Button", L"高亮颜色跟随系统主题色", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 314, 460, 268, 20, IDC_P2_HOVERAUTO);
+    Ctl(p, L"Static", L"深色", 0, 0, 312, 426, 32, 18, -1);
+    Ctl(p, L"Button", L"背景色", BS_PUSHBUTTON | WS_TABSTOP, 0, 378, 422, 48, 24, IDC_P2_BGCOLOR);
+    Ctl(p, L"Button", L"高亮色", BS_PUSHBUTTON | WS_TABSTOP, 0, 430, 422, 48, 24, IDC_P2_HOVERCOLOR);
+    Ctl(p, L"Button", L"边框色", BS_PUSHBUTTON | WS_TABSTOP, 0, 482, 422, 48, 24, IDC_P2_BORDCOLOR);
+    Ctl(p, L"Button", L"文字色", BS_PUSHBUTTON | WS_TABSTOP, 0, 534, 422, 48, 24, IDC_P2_TEXTCOLOR);
+    Ctl(p, L"Static", L"浅色", 0, 0, 312, 458, 32, 18, -1);
+    Ctl(p, L"Button", L"背景色", BS_PUSHBUTTON | WS_TABSTOP, 0, 378, 454, 48, 24, IDC_P2_BGCOLOR_L);
+    Ctl(p, L"Button", L"高亮色", BS_PUSHBUTTON | WS_TABSTOP, 0, 430, 454, 48, 24, IDC_P2_HOVERCOLOR_L);
+    Ctl(p, L"Button", L"边框色", BS_PUSHBUTTON | WS_TABSTOP, 0, 482, 454, 48, 24, IDC_P2_BORDCOLOR_L);
+    Ctl(p, L"Button", L"文字色", BS_PUSHBUTTON | WS_TABSTOP, 0, 534, 454, 48, 24, IDC_P2_TEXTCOLOR_L);
+    Ctl(p, L"Button", L"高亮颜色跟随系统主题色", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 312, 490, 272, 20, IDC_P2_HOVERAUTO);
 
-    // Col 3: 文字与中心
-    Ctl(p, L"Button", L"文字与中心区", BS_GROUPBOX, 0, 600, 236, 290, 246, -1);
-    Ctl(p, L"Button", L"显示扇区文字标签", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 616, 264, 150, 20, IDC_P2_LABELS);
-
-    AddSliderWithEdit(p, IDC_P2_LABELSIZE, 616, 300, 36, L"字号", 654, 296, 130, 8, 28, 13,
-                      790, 297, 52, 22, 846, 300, 30, L"px");
-
-    Ctl(p, L"Button", L"🔤 标签字体…", BS_PUSHBUTTON | WS_TABSTOP, 0, 616, 336, 120, 28, IDC_P2_LABELFONT);
-
-    Ctl(p, L"Static", L"中心显示", 0, 0, 616, 384, 60, 18, -1);
-    HWND cm = Ctl(p, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0, 684, 380, 192, 200, IDC_P2_CENTER);
+    // Col 3: 文字与中心区 — label@608 w64, controls@674
+    Ctl(p, L"Button", L"显示扇区文字标签", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 608, 298, 150, 20, IDC_P2_LABELS);
+    AddSliderWithEdit(p, IDC_P2_LABELSIZE, 608, 330, 64, L"字号", 674, 326, 112, 8, 28, 13,
+                      792, 327, 46, 22, 842, 330, 22, L"px");
+    Ctl(p, L"Button", L"标签字体…", BS_PUSHBUTTON | WS_TABSTOP, 0, 608, 362, 110, 26, IDC_P2_LABELFONT);
+    Ctl(p, L"Static", L"中心显示", 0, 0, 608, 398, 64, 18, -1);
+    HWND cm = Ctl(p, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0, 674, 394, 186, 200, IDC_P2_CENTER);
     ComboBox_AddString(cm, L"页码 (如 1/2)");
     ComboBox_AddString(cm, L"自定义文字");
     ComboBox_AddString(cm, L"不显示 (留空)");
+    Ctl(p, WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 674, 426, 186, 26, IDC_P2_CENTERTEXT);
 
-    Ctl(p, WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 616, 420, 260, 26, IDC_P2_CENTERTEXT);
+    // 液态玻璃（背景模式选“液态玻璃”时可用，改动即时反映在上方预览）
+    Section(p, L"液态玻璃折射（背景模式选择“液态玻璃”时生效）", 16, 522, 600);
+    AddSliderWithEdit(p, IDC_P2_GLASSBLUR,   16, 558, 32, L"模糊",     52, 554, 110, 0, 16, (int)g_cfg.app.glassBlur,
+                      166, 555, 44, 22, 214, 558, 20, L"px");
+    AddSliderWithEdit(p, IDC_P2_GLASSHEIGHT, 246, 558, 60, L"折射深度", 310, 554, 110, 0, 48, (int)g_cfg.app.glassHeight,
+                      424, 555, 44, 22, 472, 558, 20, L"px");
+    AddSliderWithEdit(p, IDC_P2_GLASSAMT,    500, 558, 60, L"折射强度", 564, 554, 110, 0, 100, (int)g_cfg.app.glassAmount,
+                      678, 555, 44, 22, 0, 0, 0, nullptr);
+    Ctl(p, L"Button", L"色散",     BS_AUTOCHECKBOX | WS_TABSTOP, 0, 732, 558, 52, 20, IDC_P2_GLASSCHROMA);
+    Ctl(p, L"Button", L"边缘高光", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 788, 558, 72, 20, IDC_P2_GLASSHL);
+    Ctl(p, L"Button", L"色彩鲜活", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 788, 582, 72, 20, IDC_P2_GLASSVIB);
 
-    // 液态玻璃参数条（背景模式选“液态玻璃”时可用，改动即时反映在上方预览）
-    Ctl(p, L"Button", L"液态玻璃折射 (背景模式选“液态玻璃”时生效)", BS_GROUPBOX, 0, 10, 484, 880, 94, -1);
-    AddSliderWithEdit(p, IDC_P2_GLASSBLUR,   24, 506, 32, L"模糊",     58, 502, 86, 0, 16, (int)g_cfg.app.glassBlur,
-                      148, 503, 44, 22, 196, 506, 20, L"px");
-    AddSliderWithEdit(p, IDC_P2_GLASSHEIGHT, 220, 506, 60, L"折射深度", 282, 502, 86, 0, 48, (int)g_cfg.app.glassHeight,
-                      372, 503, 44, 22, 420, 506, 20, L"px");
-    AddSliderWithEdit(p, IDC_P2_GLASSAMT,    444, 506, 60, L"折射强度", 506, 502, 86, 0, 100, (int)g_cfg.app.glassAmount,
-                      596, 503, 44, 22, 0, 0, 0, nullptr);
-    Ctl(p, L"Button", L"色散",     BS_AUTOCHECKBOX | WS_TABSTOP, 0, 648, 506, 58, 20, IDC_P2_GLASSCHROMA);
-    Ctl(p, L"Button", L"边缘高光", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 710, 506, 80, 20, IDC_P2_GLASSHL);
-    Ctl(p, L"Button", L"色彩鲜活", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 794, 506, 80, 20, IDC_P2_GLASSVIB);
-
-    // 性能条：实时折射背景的截取分辨率与频率（液态玻璃/亚克力）
-    AddSliderWithEdit(p, IDC_P2_CUTRES,  24, 538, 44, L"清晰度", 70, 530, 86, 25, 100,
+    // 性能：实时折射背景的截取分辨率与频率（液态玻璃/亚克力）
+    AddSliderWithEdit(p, IDC_P2_CUTRES,  16, 594, 44, L"清晰度", 64, 590, 110, 25, 100,
                       (int)(g_cfg.app.backdropScale > 0.0f ? g_cfg.app.backdropScale * 100.0f : 100.0f),
-                      160, 535, 44, 22, 208, 538, 22, L"%");
-    AddSliderWithEdit(p, IDC_P2_CUTFPS, 236, 538, 56, L"截取频率", 294, 530, 86, 10, 60, g_cfg.app.backdropFps,
-                      384, 535, 44, 22, 432, 538, 26, L"Hz");
-    Ctl(p, L"Static", L"降低清晰度或截取频率可缓解卡顿（实时背景更新率）", 0, 0, 466, 542, 410, 18, -1);
+                      178, 591, 44, 22, 226, 594, 22, L"%");
+    AddSliderWithEdit(p, IDC_P2_CUTFPS, 262, 594, 56, L"截取频率", 322, 590, 110, 10, 60, g_cfg.app.backdropFps,
+                      436, 591, 44, 22, 484, 594, 26, L"Hz");
+    Ctl(p, L"Static", L"降低清晰度或截取频率可缓解卡顿（实时背景更新率）", 0, 0, 528, 598, 336, 18, -1);
 }
 
 static void BuildPanel3(HWND p) {
-    Ctl(p, L"Button", L"手势触发与系统设置", BS_GROUPBOX, 0, 10, 8, 880, 165, -1);
+    // single column: label gutter 64@16, controls@88, generous row pitch
+    Section(p, L"触发", 16, 16, 200);
 
-    Ctl(p, L"Button", L"全局启用 RightDial 轮盘功能（关闭后手势完全失效）", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 24, 32, 420, 20, IDC_P3_ENABLE);
+    Ctl(p, L"Button", L"全局启用 RightDial 轮盘功能（关闭后手势完全失效）", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 16, 46, 480, 20, IDC_P3_ENABLE);
 
-    Ctl(p, L"Static", L"触发操作", 0, 0, 24, 66, 60, 18, -1);
-    HWND btn = Ctl(p, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0, 90, 62, 175, 200, IDC_P3_BUTTON);
+    Ctl(p, L"Static", L"触发操作", 0, 0, 16, 90, 64, 18, -1);
+    HWND btn = Ctl(p, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0, 88, 86, 190, 200, IDC_P3_BUTTON);
     ComboBox_AddString(btn, L"鼠标右键拖动 (推荐)");
     ComboBox_AddString(btn, L"鼠标中键拖动");
 
-    AddSliderWithEdit(p, IDC_P3_THRESHOLD, 290, 66, 70, L"唤出灵敏度",
-                      366, 62, 115, 6, 40, (int)g_cfg.beh.thresholdPx,
-                      490, 62, 42, 26, 536, 66, 25, L"px");
+    AddSliderWithEdit(p, IDC_P3_THRESHOLD, 16, 122, 70, L"唤出灵敏度",
+                      90, 118, 170, 6, 40, (int)g_cfg.beh.thresholdPx,
+                      266, 119, 46, 26, 318, 122, 25, L"px");
+    AddSliderWithEdit(p, IDC_P3_WHEELSENS, 360, 122, 70, L"翻页灵敏度",
+                      434, 118, 170, 20, 300, g_cfg.beh.wheelSensitivity,
+                      610, 119, 46, 26, 662, 122, 25, L"%");
 
-    AddSliderWithEdit(p, IDC_P3_WHEELSENS, 580, 66, 70, L"翻页灵敏度",
-                      656, 62, 115, 20, 300, g_cfg.beh.wheelSensitivity,
-                      780, 62, 46, 26, 830, 66, 25, L"%");
+    Ctl(p, L"Button", L"在任务栏系统托盘显示图标（隐藏后再次双击运行程序即可打开本设置）", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 16, 158, 560, 20, IDC_P3_TRAY);
+    Ctl(p, L"Button", L"开机自启动", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 16, 190, 120, 20, IDC_P3_AUTOSTART);
+    Ctl(p, L"Static", L"提示：翻页灵敏度默认 100%（滚轮 1 格翻 1 页），调高更敏锐，调低防误触。", 0, 0, 200, 194, 640, 18, -1);
 
-    Ctl(p, L"Button", L"在任务栏系统托盘显示图标（隐藏后再次双击运行程序即可打开本设置）", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 24, 100, 560, 20, IDC_P3_TRAY);
-    Ctl(p, L"Button", L"开机自启动", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 24, 130, 120, 20, IDC_P3_AUTOSTART);
-    Ctl(p, L"Static", L"提示：翻页灵敏度默认 100%（滚轮 1 格翻 1 页），调高更敏锐，调低防误触。", 0, 0, 160, 132, 580, 18, -1);
+    Section(p, L"程序排除名单（游戏与专业软件防手势冲突）", 16, 230, 400);
+    Ctl(p, L"Button", L"自动排除所有无边框全屏程序（玩独占/全屏游戏时自动禁用手势）", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 16, 260, 480, 20, IDC_P3_EXCLFULL);
 
-    Ctl(p, L"Button", L"程序排除名单（游戏与专业软件防手势冲突）", BS_GROUPBOX, 0, 10, 182, 880, 335, -1);
-    Ctl(p, L"Button", L"自动排除所有无边框全屏程序（玩独占/全屏游戏时自动禁用手势）", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 24, 206, 480, 20, IDC_P3_EXCLFULL);
+    Ctl(p, WC_LISTBOXW, L"", LBS_NOTIFY | LBS_HASSTRINGS | WS_VSCROLL, WS_EX_CLIENTEDGE, 16, 290, 848, 170, IDC_P3_EXCL);
 
-    Ctl(p, WC_LISTBOXW, L"", LBS_NOTIFY | LBS_HASSTRINGS | WS_VSCROLL, WS_EX_CLIENTEDGE, 24, 234, 640, 210, IDC_P3_EXCL);
+    Ctl(p, WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 470, 300, 26, IDC_P3_EXCLEDIT);
+    Ctl(p, L"Button", L"添加进程", BS_PUSHBUTTON | WS_TABSTOP, 0, 324, 469, 90, 28, IDC_P3_EXCLADD);
+    Ctl(p, L"Button", L"从运行中选择…", BS_PUSHBUTTON | WS_TABSTOP, 0, 420, 469, 140, 28, IDC_P3_EXCLRUN);
+    Ctl(p, L"Button", L"删除选中", BS_PUSHBUTTON | WS_TABSTOP, 0, 566, 469, 90, 28, IDC_P3_EXCLDEL);
 
-    Ctl(p, WC_EDITW, L"", ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 24, 456, 320, 26, IDC_P3_EXCLEDIT);
-    Ctl(p, L"Button", L"+ 添加进程", BS_PUSHBUTTON | WS_TABSTOP, 0, 352, 455, 90, 28, IDC_P3_EXCLADD);
-    Ctl(p, L"Button", L"🔍 从运行中选择…", BS_PUSHBUTTON | WS_TABSTOP, 0, 448, 455, 140, 28, IDC_P3_EXCLRUN);
-    Ctl(p, L"Button", L"✕ 删除选中", BS_PUSHBUTTON | WS_TABSTOP, 0, 594, 455, 90, 28, IDC_P3_EXCLDEL);
-
-    Ctl(p, L"Static", L"提示：在以上指定进程的前台窗口中长按右键不会唤出轮盘，避免干扰游戏移动或视线操作。", 0, 0, 24, 490, 650, 18, -1);
+    Ctl(p, L"Static", L"提示：在以上指定进程的前台窗口中长按右键不会唤出轮盘，避免干扰游戏移动或视线操作。", 0, 0, 16, 508, 700, 18, -1);
 }
 
-// ---------- tab / panels ----------
+// ---------- nav / panels / chrome layout ----------
 
 static void SwitchTab(int idx) {
+    s_navSel = idx;
     ShowWindow(s_panel1, idx == 0 ? SW_SHOW : SW_HIDE);
     ShowWindow(s_panel2, idx == 1 ? SW_SHOW : SW_HIDE);
     ShowWindow(s_panel3, idx == 2 ? SW_SHOW : SW_HIDE);
+    if (s_nav) InvalidateRect(s_nav, nullptr, FALSE);
+}
+
+// default logical window metrics (96dpi); S() scales them
+static int DefWinW() { return 1080; }
+static int DefWinH() { return 700; }
+static int NavW()    { return S(200); }
+static int FooterH() { return S(46); }
+
+// stretchy re-anchor on resize: only horizontal breathing room is claimed
+// (form rows widen; everything else keeps its measured position)
+static void StretchW(HWND c, int baseLogicalW, int extra) {
+    if (!c || extra <= 0) return;
+    RECT r;
+    GetWindowRect(c, &r);
+    SetWindowPos(c, nullptr, 0, 0, S(baseLogicalW) + extra, r.bottom - r.top,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 static void LayoutPanels() {
+    if (!s_hwnd || !s_nav) return;
     RECT rc;
-    GetClientRect(s_tab, &rc);
-    SendMessageW(s_tab, TCM_ADJUSTRECT, FALSE, (LPARAM)&rc);
-    MapWindowPoints(s_tab, s_hwnd, (POINT*)&rc, 2);
-    SetWindowPos(s_panel1, nullptr, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, SWP_NOZORDER);
-    SetWindowPos(s_panel2, nullptr, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, SWP_NOZORDER);
-    SetWindowPos(s_panel3, nullptr, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, SWP_NOZORDER);
+    GetClientRect(s_hwnd, &rc);
+    int W = rc.right, H = rc.bottom - FooterH();
+    int pw = W - NavW();
+    if (pw < 100) pw = 100;
+    SetWindowPos(s_nav, nullptr, 0, 0, NavW(), H, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(s_panel1, nullptr, NavW(), 0, pw, H, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(s_panel2, nullptr, NavW(), 0, pw, H, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(s_panel3, nullptr, NavW(), 0, pw, H, SWP_NOZORDER | SWP_NOACTIVATE);
+
+    int extraW = pw - S(880);
+    StretchW(P1Of(IDC_P1_NAME), 288, extraW);
+    StretchW(P1Of(IDC_P1_KEYS_HINT), 292, extraW);
+    StretchW(P1Of(IDC_P1_TARGET), 288, extraW);
+    StretchW(P2Of(IDC_P2_PREVIEW), 848, extraW);
+    StretchW(P3Of(IDC_P3_EXCL), 848, extraW);
+
+    // footer: hint left, close right, hairline drawn in WM_PAINT
+    int fy = rc.bottom - FooterH();
+    SetWindowPos(s_footHint, nullptr, NavW() + S(14), fy + (FooterH() - S(20)) / 2, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    if (HWND closeBtn = CtrlOf(IDC_CLOSE))
+        SetWindowPos(closeBtn, nullptr, rc.right - S(14) - S(120), fy + (FooterH() - S(30)) / 2, S(120), S(30), SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 // ---------- message handling ----------
@@ -2329,12 +2636,56 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             IconCache::I().Clear();
         }
         return 0;
-    case WM_NOTIFY: {
-        NMHDR* nm = (NMHDR*)lp;
-        if (nm->idFrom == IDC_TAB && nm->code == TCN_SELCHANGE)
-            SwitchTab((int)SendMessageW(s_tab, TCM_GETCURSEL, 0, 0));
-        break;
+    case WM_ERASEBKGND: {
+        HDC dc = (HDC)wp;
+        RECT rc;
+        GetClientRect(h, &rc);
+        FillRect(dc, &rc, s_br.content);
+        return 1;
     }
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        RECT rc;
+        GetClientRect(h, &rc);
+        // footer hairline above the bottom bar
+        int fy = rc.bottom - FooterH();
+        HPEN pen = CreatePen(PS_SOLID, 1, UiThemeNow().sep);
+        HGDIOBJ op = SelectObject(dc, pen);
+        MoveToEx(dc, 0, fy, nullptr);
+        LineTo(dc, rc.right, fy);
+        SelectObject(dc, op);
+        DeleteObject(pen);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_SIZE:
+        if (wp != SIZE_MINIMIZED) LayoutPanels();
+        return 0;
+    case WM_GETMINMAXINFO: {
+        MINMAXINFO* mmi = (MINMAXINFO*)lp;
+        RECT rw = { 0, 0, S(DefWinW()), S(DefWinH()) };
+        AdjustWindowRect(&rw, WS_OVERLAPPEDWINDOW, FALSE);
+        mmi->ptMinTrackSize = { rw.right - rw.left, rw.bottom - rw.top };
+        return 0;
+    }
+    case WM_DPICHANGED: {
+        // fonts and all child rects are DPI-baked; rebuild at the suggested rect
+        RECT* pr = (RECT*)lp;
+        int x = pr->left, y = pr->top, w = pr->right - pr->left, ht = pr->bottom - pr->top;
+        s_font = s_fontBold = s_fontSection = s_fontTitle = nullptr;   // stale DPI fonts
+        s_gridFont = nullptr;
+        DestroyWindow(h);
+        OpenSettings();
+        if (s_hwnd) SetWindowPos(s_hwnd, nullptr, x, y, w, ht, SWP_NOZORDER);
+        return 0;
+    }
+    case WM_SETTINGCHANGE:
+        if (lp && wcscmp((const wchar_t*)lp, L"ImmersiveColorSet") == 0) {
+            UxRefreshTheme();
+            ResolveUITheme();
+        }
+        return 0;
     case WM_COMMAND:
         OnCommand(h, LOWORD(wp), HIWORD(wp), (HWND)lp);
         return 0;
@@ -2373,21 +2724,37 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_CTLCOLORSTATIC: {
         HDC dc = (HDC)wp;
+        HWND c = (HWND)lp;
+        wchar_t cls[16] = L"";
+        GetClassNameW(c, cls, 16);
+        if (_wcsicmp(cls, L"Edit") == 0) {
+            // disabled/readonly edits arrive here: keep the control surface,
+            // dim the text so the state stays legible in both themes
+            UiTheme t = UiThemeNow();
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, t.textDim);
+            SetBkColor(dc, t.control);
+            return (LRESULT)s_br.control;
+        }
         SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, RGB(30, 41, 59));
-        static HBRUSH s_bgBr = CreateSolidBrush(RGB(246, 248, 250));
-        return (LRESULT)s_bgBr;
+        // section headings carry the dim font; ordinary labels stay full-contrast
+        HFONT f = (HFONT)SendMessageW(c, WM_GETFONT, 0, 0);
+        SetTextColor(dc, (f && f == s_fontSection) ? UiThemeNow().textDim : UiThemeNow().text);
+        return (LRESULT)s_br.content;
     }
-    case WM_CTLCOLOREDIT: {
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX: {
         HDC dc = (HDC)wp;
-        SetBkColor(dc, RGB(255, 255, 255));
-        SetTextColor(dc, RGB(30, 41, 59));
-        static HBRUSH s_editBr = CreateSolidBrush(RGB(255, 255, 255));
-        return (LRESULT)s_editBr;
+        UiTheme t = UiThemeNow();
+        SetTextColor(dc, t.editText);
+        SetBkColor(dc, t.control);
+        return (LRESULT)s_br.control;
     }
+    case WM_CTLCOLORBTN:
     case WM_CTLCOLORDLG: {
-        static HBRUSH s_bgBr = CreateSolidBrush(RGB(246, 248, 250));
-        return (LRESULT)s_bgBr;
+        HDC dc = (HDC)wp;
+        SetBkColor(dc, UiThemeNow().content);
+        return (LRESULT)s_br.content;
     }
     case WM_CLOSE:
         SaveConfig(g_cfg);
@@ -2396,6 +2763,8 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_DESTROY:
         s_hwnd = nullptr;
+        s_nav = nullptr;
+        s_footHint = nullptr;
         IconCache::I().Clear();   // free icon bitmaps; wheel reloads them on demand
         EnsureMouseHook();
         return 0;
@@ -2483,32 +2852,50 @@ static LRESULT CALLBACK KeysProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR,
 
 // ---------- window creation ----------
 
+static void CreateFonts() {
+    if (s_font) return;
+    auto make = [&](int pt, int weight) {
+        LOGFONTW lf = {};
+        lf.lfHeight = -MulDiv(pt, (int)s_dpi, 72);
+        lf.lfWeight = weight;
+        lf.lfQuality = CLEARTYPE_QUALITY;
+        wcsncpy_s(lf.lfFaceName, L"Microsoft YaHei UI", _TRUNCATE);
+        return CreateFontIndirectW(&lf);
+    };
+    s_font        = make(9, FW_NORMAL);
+    s_fontBold    = make(9, FW_SEMIBOLD);
+    s_fontSection = make(9, FW_SEMIBOLD);
+    s_fontTitle   = make(12, FW_SEMIBOLD);
+}
+
 static void CreateMainWindow(HWND h) {
+    s_hwnd = h;
     s_dpi = GetDpiForWindow(h);
+    ResolveUITheme(true);
+    DwmDarkTitlebar(h, s_dark);
+    CreateFonts();
 
-    LOGFONTW lf = {};
-    lf.lfHeight = -MulDiv(10, (int)s_dpi, 72);
-    lf.lfWeight = FW_NORMAL;
-    lf.lfQuality = CLEARTYPE_QUALITY;
-    wcsncpy_s(lf.lfFaceName, L"Microsoft YaHei UI", _TRUNCATE);
-    s_font = CreateFontIndirectW(&lf);
-
-    int W = S(950), H = S(675);
+    int W = S(DefWinW()), H = S(DefWinH());
     RECT rw = { 0, 0, W, H };
-    AdjustWindowRect(&rw, WS_OVERLAPPEDWINDOW & ~(WS_MAXIMIZEBOX | WS_THICKFRAME), FALSE);
+    AdjustWindowRect(&rw, WS_OVERLAPPEDWINDOW, FALSE);
     RECT wa = WorkAreaForPoint(GetCursorPosSafe());
     int x = wa.left + ((wa.right - wa.left) - (rw.right - rw.left)) / 2;
     int y = wa.top + ((wa.bottom - wa.top) - (rw.bottom - rw.top)) / 2;
     SetWindowPos(h, nullptr, x, y, rw.right - rw.left, rw.bottom - rw.top, SWP_NOZORDER);
 
-    s_tab = Ctl(h, WC_TABCONTROL, L"", WS_TABSTOP | TCS_TABS, 0, 10, 10, 924, 605, IDC_TAB);
-    TCITEMW ti = {};
-    ti.mask = TCIF_TEXT;
-    const wchar_t* tabs[3] = { L"  ⚙️ 槽位与动作  ", L"  🎨 轮盘外观定制  ", L"  🛡️ 行为与规则  " };
-    for (int i = 0; i < 3; i++) {
-        ti.pszText = (LPWSTR)tabs[i];
-        TabCtrl_InsertItem(s_tab, i, &ti);
+    // full-height navigation sidebar + content panels
+    WNDCLASSEXW navwc = { sizeof(navwc) };
+    if (!GetClassInfoExW(g_hInst, NAV_CLASS, &navwc)) {
+        navwc = { sizeof(navwc) };
+        navwc.lpfnWndProc = NavProc;
+        navwc.hInstance = g_hInst;
+        navwc.hCursor = LoadCursorW(nullptr, IDC_HAND);
+        navwc.lpszClassName = NAV_CLASS;
+        RegisterClassExW(&navwc);
     }
+    s_nav = CreateWindowExW(0, NAV_CLASS, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                            0, 0, NavW(), 100, h, (HMENU)(INT_PTR)IDC_TAB, g_hInst, nullptr);
+
     s_panel1 = CreateWindowExW(0, L"Static", L"", WS_CHILD | WS_CLIPCHILDREN, 0, 0, 10, 10, h, nullptr, g_hInst, nullptr);
     s_panel2 = CreateWindowExW(0, L"Static", L"", WS_CHILD | WS_CLIPCHILDREN, 0, 0, 10, 10, h, nullptr, g_hInst, nullptr);
     s_panel3 = CreateWindowExW(0, L"Static", L"", WS_CHILD | WS_CLIPCHILDREN, 0, 0, 10, 10, h, nullptr, g_hInst, nullptr);
@@ -2522,14 +2909,15 @@ static void CreateMainWindow(HWND h) {
     SetWindowSubclass(s_panel2, PanelProc, 3, 0);
     SetWindowSubclass(s_panel3, PanelProc, 3, 0);
     SetWindowSubclass(P1Of(IDC_P1_KEYS), KeysProc, 2, 0);
+
+    // footer: quiet hint + primary close action
+    s_footHint = Ctl(h, L"Static", L"修改即时生效并自动保存；呼出轮盘即应用新配置。", 0, 0, 0, 0, 550, 20, -1);
+    if (s_fontSection) SendMessageW(s_footHint, WM_SETFONT, (WPARAM)s_fontSection, TRUE);
+    Ctl(h, L"Button", L"完成并关闭", BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 0, 0, 120, 30, IDC_CLOSE);
+
     LayoutPanels();
-
-    Ctl(h, L"Static", L"✨ 修改即时生效并自动保存；呼出轮盘即应用新配置。", 0, 0, 14, 624, 550, 20, -1);
-    Ctl(h, L"Button", L"完成并关闭", BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 814, 620, 120, 30, IDC_CLOSE);
-
     SwitchTab(0);
     RefreshAll();
-    SendMessageW(s_tab, TCM_SETCURSEL, 0, 0);
 }
 
 static LRESULT CALLBACK SettingsWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
@@ -2562,13 +2950,12 @@ void OpenSettings() {
         wc.lpfnWndProc = SettingsWndProc;
         wc.hInstance = g_hInst;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = CreateSolidBrush(RGB(246, 248, 250));
-        wc.lpszClassName = MAIN_CLASS;
+        wc.lpszClassName = MAIN_CLASS;   // bg painted per-theme in WM_ERASEBKGND
         wc.hIcon = (HICON)LoadImageW(g_hInst, MAKEINTRESOURCEW(1), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE);
         RegisterClassExW(&wc);
     }
     CreateWindowExW(0, MAIN_CLASS, L"RightDial 设置",
-                    WS_OVERLAPPEDWINDOW & ~(WS_MAXIMIZEBOX | WS_THICKFRAME),
+                    WS_OVERLAPPEDWINDOW | WS_TABSTOP,
                     CW_USEDEFAULT, CW_USEDEFAULT, 0, 0, nullptr, nullptr, g_hInst, nullptr);
     if (s_hwnd) {
         ShowWindow(s_hwnd, SW_SHOWNORMAL);

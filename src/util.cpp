@@ -112,6 +112,50 @@ POINT GetCursorPosSafe() {
     return p;
 }
 
+// ---------- Windows 10 1809+ immersive dark mode ----------
+// uxtheme private ordinals, resolved dynamically so older systems no-op.
+
+static FARPROC UxOrdinal(int ord) {
+    HMODULE m = GetModuleHandleW(L"uxtheme.dll");
+    return m ? GetProcAddress(m, MAKEINTRESOURCEA(ord)) : nullptr;
+}
+
+// SetPreferredAppMode + policy refresh: without RefreshImmersiveColorPolicyState
+// the dark flag never reaches themed controls (buttons/checkboxes/combos keep
+// painting light-theme BLACK text over our dark brushes). Call once per
+// process before creating windows. mode: 1=AllowDark 2=ForceDark 3=ForceLight
+void UxSetAppMode(int mode) {
+    typedef int(WINAPI* FnMode)(int);
+    typedef void(WINAPI* FnRefresh)(void);
+    static FnMode fn = (FnMode)UxOrdinal(135);
+    static FnRefresh refresh = (FnRefresh)UxOrdinal(104);
+    if (fn) fn(mode);
+    if (refresh) refresh();
+}
+
+// per-window dark mode for common controls; harmless on systems without it
+bool UxAllowDarkForWindow(HWND h, bool dark) {
+    typedef BOOL(WINAPI* Fn)(HWND, BOOL);
+    static Fn fn = (Fn)UxOrdinal(133);
+    if (!fn || !h) return false;
+    return fn(h, dark) != FALSE;
+}
+
+// re-evaluate theme after a system color change (menus etc.)
+void UxRefreshTheme() {
+    typedef void(WINAPI* FnRefresh)(void);
+    typedef void(WINAPI* FnFlush)(void);
+    if (FnRefresh f = (FnRefresh)UxOrdinal(104)) f();
+    if (FnFlush f = (FnFlush)UxOrdinal(136)) f();
+}
+
+// immersive dark titlebar / window frame (attribute 20, 19 on older builds)
+void DwmDarkTitlebar(HWND h, bool dark) {
+    BOOL v = dark ? TRUE : FALSE;
+    if (FAILED(DwmSetWindowAttribute(h, 20, &v, sizeof(v))))
+        DwmSetWindowAttribute(h, 19, &v, sizeof(v));
+}
+
 HMONITOR MonitorFromPointSafe(POINT pt) {
     return MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
 }

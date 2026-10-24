@@ -41,6 +41,12 @@
 - **内置 Lucide 图标库（1744 枚）**：槽位设置点「📚 图标库…」打开选择器，支持按名称实时搜索（忽略大小写与 `-`/`_`）、方向键浏览、双击或「使用」应用；保存为 `builtin:lucide:<名称>`（如 `builtin:lucide:folder`），描边颜色随深/浅主题自动变色
 - 支持自定义替换：`png / jpg / jpeg / bmp / ico / svg`
 
+### 设置面板
+- **侧栏导航**：槽位与动作 / 轮盘外观 / 行为与规则三个分区常驻左侧栏（Lucide 图标 + 选中高亮），窗口可自由缩放（表单行随宽度伸展），跨显示器 DPI 变化自动重建
+- **跟随系统深浅色**：标题栏、侧栏、控件（滑块 / 下拉框 / 列表 / 按钮 / 滚动条）与图标选择器等弹窗同步系统主题，系统切换深浅模式时实时跟随（含禁用态控件的弱化配色）
+- 统一行网格布局（对齐标签列与控件列、统一行距），无分组框嵌套；预览画布为柔和摄影棚底色；底部状态栏常驻"修改即时生效并自动保存"提示
+- 冒烟测试：环境变量 `RIGHTDIAL_UI_DARK=0/1` 可强制 UI 深/浅色（同时强制控件主题），配合 `tools\uishot.ps1` / `uiclick.ps1` 截图验证
+
 ### 后台行为
 - 托盘图标 + 右键菜单（设置 / 启用 / 开机自启 / 使用说明 / 退出）
 - **可选隐藏托盘图标**；隐藏后**再次运行 RightDial.exe 即打开设置面板**（单实例转发），或命令行 `/settings`
@@ -52,8 +58,8 @@
 
 | 文件 | 说明 |
 |---|---|
-| `bin/RightDial-1.0.4-setup.msi` | 安装版（MSI，中文安装向导，装到 Program Files，含开始菜单快捷方式） |
-| `bin/RightDial-1.0.4-portable.zip` | 便携版（解压即用，配置保存在 exe 同目录，附使用说明） |
+| `bin/RightDial-1.0.5-setup.msi` | 安装版（MSI，中文安装向导，装到 Program Files，含开始菜单快捷方式） |
+| `bin/RightDial-1.0.5-portable.zip` | 便携版（解压即用，配置保存在 exe 同目录，附使用说明） |
 
 安装版与便携版的行为差异仅在配置文件位置：
 - 安装版：`%APPDATA%\RightDial\config.json`
@@ -73,7 +79,7 @@ RightDial.exe /testwheel  在屏幕中央显示一次轮盘（诊断用）
 
 ```bat
 build.cmd        :: 编译 bin\RightDial.exe（cl /O1 /MT）
-build-msi.cmd    :: 生成 bin\RightDial-1.0.4-setup.msi（WiX 5，dotnet tool install --global wix --version 5.0.2）
+build-msi.cmd    :: 生成 bin\RightDial-1.0.5-setup.msi（WiX 5，dotnet tool install --global wix --version 5.0.2）
 build-hooklat.cmd :: 编译 bin\hooklat.exe（低层钩子延迟回归探针，见下）
 ```
 

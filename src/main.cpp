@@ -64,6 +64,9 @@ static LRESULT CALLBACK MainWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_APP_TRAY:
         TrayHandle(wp, lp);
         return 0;
+    case WM_SETTINGCHANGE:
+        if (lp && wcscmp((const wchar_t*)lp, L"ImmersiveColorSet") == 0) UxRefreshTheme();
+        return 0;
     case WM_CLOSE:
         SettingsFlushAndClose();
         WheelCancel();
@@ -93,6 +96,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     UNREFERENCED_PARAMETER(nCmdShow);
     g_hInst = hInst;
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    // menus/controls follow the system dark theme; RIGHTDIAL_UI_DARK=0/1 is a
+    // smoke-test override that also forces the control theme accordingly
+    const char* uiDark = getenv("RIGHTDIAL_UI_DARK");
+    if (uiDark && *uiDark == '1')     UxSetAppMode(2);   // ForceDark
+    else if (uiDark && *uiDark == '0') UxSetAppMode(3);  // ForceLight
+    else                               UxSetAppMode(1);  // AllowDark
 
     g_mutex = CreateMutexW(nullptr, TRUE, L"Local\\RightDial.SingleInstance");
     bool alreadyRunning = GetLastError() == ERROR_ALREADY_EXISTS;
