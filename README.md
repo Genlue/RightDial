@@ -59,8 +59,8 @@
 
 | 文件 | 说明 |
 |---|---|
-| `bin/RightDial-1.0.5-setup.msi` | 安装版（MSI，中文安装向导，装到 Program Files，含开始菜单快捷方式） |
-| `bin/RightDial-1.0.5-portable.zip` | 便携版（解压即用，配置保存在 exe 同目录，附使用说明） |
+| `bin/RightDial-1.0.6-setup.msi` | 安装版（MSI，中文安装向导，装到 Program Files，含开始菜单快捷方式） |
+| `bin/RightDial-1.0.6-portable.zip` | 便携版（解压即用，配置保存在 exe 同目录，附使用说明） |
 
 安装版与便携版的行为差异仅在配置文件位置：
 - 安装版：`%APPDATA%\RightDial\config.json`
@@ -80,7 +80,7 @@ RightDial.exe /testwheel  在屏幕中央显示一次轮盘（诊断用）
 
 ```bat
 build.cmd        :: 编译 bin\RightDial.exe（cl /O1 /MT）
-build-msi.cmd    :: 生成 bin\RightDial-1.0.5-setup.msi（WiX 5，dotnet tool install --global wix --version 5.0.2）
+build-msi.cmd    :: 生成 bin\RightDial-1.0.6-setup.msi（WiX 5，dotnet tool install --global wix --version 5.0.2）
 build-hooklat.cmd :: 编译 bin\hooklat.exe（低层钩子延迟回归探针，见下）
 ```
 

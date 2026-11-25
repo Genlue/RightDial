@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $root = Split-Path $PSScriptRoot -Parent
 $dist = Join-Path $root 'dist\RightDial'
-$zip  = Join-Path $root 'bin\RightDial-1.0.5-portable.zip'
+$zip  = Join-Path $root 'bin\RightDial-1.0.6-portable.zip'
 
 # Always package the freshly built exe. dist\RightDial\RightDial.exe is
 # gitignored and never refreshed by build.cmd, so without this step the
