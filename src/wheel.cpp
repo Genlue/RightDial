@@ -33,6 +33,27 @@ static int     s_capAllocW = 0, s_capAllocH = 0;
 static LARGE_INTEGER s_lastCap{};   // QPC of the last backdrop capture
 static LARGE_INTEGER s_qpf{};
 
+// The wheel keeps itself out of screen captures so it never lands in a local
+// screenshot or recording. Remote-control viewers (UU远程 / ToDesk / RDP …)
+// receive their picture from Desktop Duplication / Windows.Graphics.Capture,
+// which honour that affinity by dropping the window completely — over a remote
+// session the user would then drag an invisible wheel. So the exclusion is
+// lifted whenever the gesture itself arrived through a remote session (injected
+// input) or a remote-control tool is running; beh.captureMode overrides it.
+static constexpr DWORD WDA_EXCLUDE = 0x00000011;   // WDA_EXCLUDEFROMCAPTURE
+
+static bool CapturableInRemote(bool remoteInput) {
+    switch (g_cfg.beh.captureMode) {
+    case 1:  return true;    // always visible in captures/shares
+    case 2:  return false;   // always hidden from them
+    default: return remoteInput || RemoteControlRunning();
+    }
+}
+
+static void ApplyCaptureAffinity(HWND h, bool capturable) {
+    SetWindowDisplayAffinity(h, capturable ? 0 /* WDA_NONE */ : WDA_EXCLUDE);
+}
+
 // Rendering a Direct2D frame plus UpdateLayeredWindow is cheap but far from
 // free. WheelUpdateHover / WheelSwitchPage are called from inside the
 // low-level mouse hook, which blocks the OS raw-input thread system-wide, so
@@ -340,7 +361,7 @@ bool WheelIsOpen() {
     return s_hwnd && IsWindowVisible(s_hwnd);
 }
 
-void WheelShowAt(POINT center) {
+void WheelShowAt(POINT center, bool remoteInput) {
     RebuildSlots();
 
     s_scale = ScaleForPoint(center);
@@ -351,10 +372,8 @@ void WheelShowAt(POINT center) {
         s_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                                  WC_WHEEL, L"", WS_POPUP, 0, 0, 10, 10, nullptr, nullptr, g_hInst, nullptr);
         if (!s_hwnd) return;
-        SetWindowDisplayAffinity(s_hwnd, 0x00000011 /* WDA_EXCLUDEFROMCAPTURE */);
-    } else {
-        SetWindowDisplayAffinity(s_hwnd, 0x00000011 /* WDA_EXCLUDEFROMCAPTURE */);
     }
+    ApplyCaptureAffinity(s_hwnd, CapturableInRemote(remoteInput));
 
     int sz = (int)std::lround(s_size);
     int x = center.x - sz / 2, y = center.y - sz / 2;

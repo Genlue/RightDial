@@ -142,6 +142,7 @@ static json CfgToJson(const AppConfig& c) {
     bh["showTray"]      = c.beh.showTray;
     bh["autostart"]     = IsAutostartEnabled();   // registry is the source of truth
     bh["excludeFullscreen"] = c.beh.excludeFullscreen;
+    bh["captureMode"]   = c.beh.captureMode;
     json ex = json::array();
     for (const std::wstring& e : c.beh.exclusions) ex.push_back(Utf16ToUtf8(e));
     bh["exclusions"] = ex;
@@ -199,6 +200,7 @@ static void CfgFromJson(const json& j, AppConfig& c) {
         c.beh.enabled       = JBool(*bh, "enabled", c.beh.enabled);
         c.beh.showTray      = JBool(*bh, "showTray", c.beh.showTray);
         c.beh.excludeFullscreen = JBool(*bh, "excludeFullscreen", c.beh.excludeFullscreen);
+        c.beh.captureMode   = JInt(*bh, "captureMode", c.beh.captureMode);
         auto ex = bh->find("exclusions");
         if (ex != bh->end() && ex->is_array())
             for (const json& e : *ex)

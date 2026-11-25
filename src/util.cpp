@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include <tlhelp32.h>
 
 std::wstring Utf8ToUtf16(const std::string& s) {
     if (s.empty()) return std::wstring();
@@ -180,4 +181,48 @@ RECT WorkAreaForPoint(POINT pt) {
     RECT r{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &r, 0);
     return r;
+}
+
+// Remote-control software present in this session? Such a session is streaming
+// the desktop through a capture API that honours WDA_EXCLUDEFROMCAPTURE, so a
+// window carrying that affinity is simply missing from the remote picture.
+// Substring match on the image name; the list only has to cover the products
+// people actually drive RightDial with. Cached: the wheel asks on every show
+// but the process list moves slowly.
+static bool ScanForRemoteTool() {
+    static const wchar_t* kTools[] = {
+        L"uuremote",    // 网易UU远程 (client / agent / service share this stem)
+        L"todesk", L"sunlogin", L"anydesk", L"teamviewer", L"rustdesk",
+        L"parsec", L"winvnc", L"vncserver", L"tvnserver", L"radmin",
+        L"truelink", L"awesun", L"splashtop", L"srservice", L"sragent",
+    };
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    wchar_t name[MAX_PATH];
+    bool found = false;
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            size_t i = 0;
+            for (; i < MAX_PATH - 1 && pe.szExeFile[i]; i++) name[i] = (wchar_t)towlower(pe.szExeFile[i]);
+            name[i] = 0;
+            for (const wchar_t* t : kTools) {
+                if (wcsstr(name, t)) { found = true; break; }
+            }
+        } while (!found && Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+bool RemoteControlRunning() {
+    static ULONGLONG last = 0;
+    static bool cached = false;
+    ULONGLONG now = GetTickCount64();
+    if (!last || now - last > 3000) {   // 3 s is plenty: this only gates capture affinity
+        last = now;
+        cached = ScanForRemoteTool();
+    }
+    return cached;
 }

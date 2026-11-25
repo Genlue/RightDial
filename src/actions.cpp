@@ -216,6 +216,7 @@ static void SendChord(const ParsedChord& c) {
         inp.type = INPUT_KEYBOARD;
         inp.ki.wVk = vk;
         inp.ki.dwFlags = (up ? KEYEVENTF_KEYUP : 0) | (isExt(vk) ? KEYEVENTF_EXTENDEDKEY : 0);
+        inp.ki.dwExtraInfo = kInjectTag;   // marks it as ours for the low-level hook
         in.push_back(inp);
     };
 

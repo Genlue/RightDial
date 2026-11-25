@@ -52,6 +52,7 @@
 - **可选隐藏托盘图标**；隐藏后**再次运行 RightDial.exe 即打开设置面板**（单实例转发），或命令行 `/settings`
 - 开机自启（写入 HKCU Run 键，安装版与便携版均可）
 - 排除名单：按进程名（如 `game.exe`）在指定程序的前台窗口中禁用轮盘，可从当前运行进程中直接选取；支持一键排除所有无边框全屏程序（游戏）
+- **远程控制可用**（UU远程 / ToDesk / 向日葵 / RDP…）：远控注入的鼠标键盘照常驱动轮盘，且轮盘会出现在对方画面里（设置 → 行为与规则 → 「远程画面」，详见下）
 - 单实例运行
 
 ## 分发包
@@ -111,6 +112,31 @@ bin\hooklat.exe -mode 1     :: 延后补发     —— 修复后，约 0.013 ms
 
 两种模式的日志分别在 `bin\hooklat_mode0.log` / `bin\hooklat_mode1.log`。**改动钩子相关代码后请重跑，`mode 1` 的 `dur=` 必须保持在 0.1 ms 量级。**
 
+### 注入输入的识别（远程控制可用性）
+
+低层钩子**不能**用 `LLMHF_INJECTED` / `LLKHF_INJECTED` 一刀切地忽略注入事件：远程控制软件（UU远程、ToDesk、向日葵、RDP…）本身就是靠 `SendInput` 把鼠标键盘送进被控端的，一刀切会让远程会话里整个手势失效（表现为右键拖动毫无反应、Esc 也关不掉轮盘）。
+
+正确做法是只忽略**自己**发的事件：自研的所有 `INPUT` 都带上 `dwExtraInfo = kInjectTag`（`app.h`），钩子里只在「带注入标志 **且** 带本程序标记」时才放行。新增任何 `SendInput` 调用都必须打上该标记，否则会被自己吞掉/触发递归。
+
+端到端回归探针（注入事件 ≈ 远程会话，逐项检查手势、取消、普通右键补发与截屏可见性）：
+
+```bat
+powershell -File tools\remoteprobe.ps1          :: 远程路径：注入拖动唤出、Esc 取消、画面可见
+powershell -File tools\remoteprobe.ps1 -Local   :: 本地路径：/testwheel 唤出，且不出现在截屏中
+```
+
+### 远程画面里看不到轮盘
+
+轮盘窗口带着 `WDA_EXCLUDEFROMCAPTURE`，以免出现在本地截图与录屏里。但远程控制软件的画面来自 Desktop Duplication / Windows.Graphics.Capture，这些抓屏方式**会直接把带该属性的窗口整块丢掉**——远程会话里就会「拖得动但看不见轮盘」。因此该属性改为按场景设置（设置 → 行为与规则 → 远程与截屏 / `behavior.captureMode`）：
+
+| 值 | 含义 |
+|---|---|
+| `0` 自动（默认） | 手势由注入输入唤出、或检测到远控软件在运行时**不排除**（对方能看见）；纯本地使用时仍排除 |
+| `1` 始终显示 | 永远允许被截屏/共享捕获 |
+| `2` 始终隐藏 | 永远从截屏/共享画面中移除 |
+
+若某个远控软件用驱动级虚拟鼠标（不产生注入事件、进程名也不在识别名单里），把该项设为「始终显示」即可。
+
 ## 目录结构
 
 ```
@@ -118,7 +144,7 @@ src/           C++ 源码（main / hook / wheel / render / glass / glass_gpu / a
 third_party/   nanosvg（SVG 渲染）、nlohmann/json（配置读写），均为单头文件
 assets/        程序图标生成脚本与 .ico
 installer/     WiX 打包定义
-tools/         冒烟测试辅助脚本（截屏 / 点击 / 内存测量）
+tools/         冒烟测试辅助脚本（截屏 / 点击 / 内存测量 / 注入输入回归 remoteprobe.ps1）
 bin/           构建产物（exe / msi / portable.zip）
 dist/          便携版打包目录
 ```
@@ -136,7 +162,7 @@ dist/          便携版打包目录
     "backdropScale": 1.0,          // 实时背景截取分辨率比例 0.25–1.0（0=自动：大轮盘半分辨率）
     "backdropFps": 60              // 实时背景截取频率上限 10–60 Hz
   },
-  "behavior":   { "triggerButton": 1, "thresholdPx": 12, "exclusions": ["game.exe"] },
+  "behavior":   { "triggerButton": 1, "thresholdPx": 12, "captureMode": 0, "exclusions": ["game.exe"] },
   "pages": [
     { "name": "常用", "slots": [
       { "type": 0, "name": "粘贴", "keys": "Ctrl+V" },

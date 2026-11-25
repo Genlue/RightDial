@@ -1297,6 +1297,7 @@ static void RefreshBehavior() {
     Button_SetCheck(P3Of(IDC_P3_TRAY), b.showTray ? BST_CHECKED : BST_UNCHECKED);
     Button_SetCheck(P3Of(IDC_P3_AUTOSTART), IsAutostartEnabled() ? BST_CHECKED : BST_UNCHECKED);
     Button_SetCheck(P3Of(IDC_P3_EXCLFULL), b.excludeFullscreen ? BST_CHECKED : BST_UNCHECKED);
+    ComboBox_SetCurSel(P3Of(IDC_P3_CAPTURE), std::clamp(b.captureMode, 0, 2));
     HWND lb = P3Of(IDC_P3_EXCL);
     ListBox_ResetContent(lb);
     for (auto& e : b.exclusions) ListBox_AddString(lb, e.c_str());
@@ -1894,6 +1895,15 @@ static void BuildPanel3(HWND p) {
     Ctl(p, L"Button", L"删除选中", BS_PUSHBUTTON | WS_TABSTOP, 0, 566, 469, 90, 28, IDC_P3_EXCLDEL);
 
     Ctl(p, L"Static", L"提示：在以上指定进程的前台窗口中长按右键不会唤出轮盘，避免干扰游戏移动或视线操作。", 0, 0, 16, 508, 700, 18, -1);
+
+    Section(p, L"远程与截屏", 16, 526, 200);
+    Ctl(p, L"Static", L"远程画面", 0, 0, 16, 560, 64, 18, -1);
+    HWND cap = Ctl(p, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0, 88, 556, 190, 200, IDC_P3_CAPTURE);
+    ComboBox_AddString(cap, L"自动 (推荐)");
+    ComboBox_AddString(cap, L"始终显示");
+    ComboBox_AddString(cap, L"始终隐藏");
+    Ctl(p, L"Static", L"自动：远控本机时轮盘显示在对方画面里，本地使用时不出现在截图与录屏中",
+        0, 0, 290, 560, 560, 18, -1);
 }
 
 // ---------- nav / panels / chrome layout ----------
@@ -2570,6 +2580,12 @@ static void OnCommand(HWND h, int id, int code, HWND ctl) {
         g_cfg.beh.excludeFullscreen = Button_GetCheck(ctl) == BST_CHECKED;
         SaveSoon();
         return;
+    case IDC_P3_CAPTURE: {
+        if (code != CBN_SELCHANGE) return;
+        g_cfg.beh.captureMode = ComboBox_GetCurSel(ctl);
+        SaveSoon();
+        return;
+    }
     case IDC_P3_EXCLRUN: {
         // popup menu listing processes of visible top-level windows
         std::vector<std::wstring> names;

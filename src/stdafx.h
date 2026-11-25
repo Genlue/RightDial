@@ -62,6 +62,10 @@ UINT   DpiForPoint(POINT pt);          // 96 on failure
 float  ScaleForPoint(POINT pt);        // dpi/96
 RECT   WorkAreaForPoint(POINT pt);
 
+// true when a remote-control tool (UU远程 / ToDesk / 向日葵 …) runs in this
+// session, i.e. the desktop we draw on is most likely being streamed
+bool   RemoteControlRunning();
+
 // Windows 10 1809+ immersive dark mode (no-ops on older systems)
 void UxSetAppMode(int mode);           // 1=AllowDark 2=ForceDark 3=ForceLight; once per process
 bool UxAllowDarkForWindow(HWND h, bool dark);

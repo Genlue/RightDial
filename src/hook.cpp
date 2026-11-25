@@ -11,6 +11,14 @@ static int   s_state = G_IDLE;
 static POINT s_downPt{ 0, 0 };
 static int   s_wheelAcc = 0;
 static bool  s_launchUpSeen = false;   // button released before the wheel came up
+static bool  s_gestureRemote = false;  // the pending gesture came from injected (= remote) input
+
+// Injected events are only ignored when *we* injected them (kInjectTag): a
+// blanket LLMHF_INJECTED / LLKHF_INJECTED filter also drops the input of
+// remote-control software, which is the only way a remote session can reach us.
+static bool IsOwnInjection(DWORD flags, ULONG_PTR extra, DWORD injectedFlag) {
+    return (flags & injectedFlag) && extra == kInjectTag;
+}
 
 static std::wstring ToLower(std::wstring s) {
     for (auto& c : s) c = (wchar_t)towlower(c);
@@ -85,8 +93,10 @@ static void InjectTriggerClick() {
     INPUT in[2] = {};
     in[0].type = INPUT_MOUSE;
     in[0].mi.dwFlags = mid ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_RIGHTDOWN;
+    in[0].mi.dwExtraInfo = kInjectTag;
     in[1].type = INPUT_MOUSE;
     in[1].mi.dwFlags = mid ? MOUSEEVENTF_MIDDLEUP : MOUSEEVENTF_RIGHTUP;
+    in[1].mi.dwExtraInfo = kInjectTag;
     SendInput(2, in, sizeof(INPUT));
 }
 
@@ -106,7 +116,7 @@ static LRESULT CALLBACK MouseProcLL(int code, WPARAM wp, LPARAM lp) {
     MSLLHOOKSTRUCT* m = (MSLLHOOKSTRUCT*)lp;
     UINT msg = (UINT)wp;
 
-    if (m->flags & LLMHF_INJECTED) return Pass(code, wp, lp);
+    if (IsOwnInjection(m->flags, m->dwExtraInfo, LLMHF_INJECTED)) return Pass(code, wp, lp);
 
     // A drag was recognized; the wheel is being opened by the message thread.
     // Keep swallowing button input until it is actually up, otherwise the tail
@@ -174,6 +184,7 @@ static LRESULT CALLBACK MouseProcLL(int code, WPARAM wp, LPARAM lp) {
             return Pass(code, wp, lp);
         }
         s_downPt = m->pt;
+        s_gestureRemote = (m->flags & LLMHF_INJECTED) != 0;   // not ours: checked above
         s_state = G_PEND;
         return 1;  // hold the button; re-inject as a click if it turns out to be one
     }
@@ -193,10 +204,10 @@ static LRESULT CALLBACK MouseProcLL(int code, WPARAM wp, LPARAM lp) {
                 s_launchUpSeen = false;
                 s_wheelAcc = 0;
                 if (g_mainHwnd)
-                    PostMessageW(g_mainHwnd, WM_APP_SHOWWHEEL, 0,
+                    PostMessageW(g_mainHwnd, WM_APP_SHOWWHEEL, s_gestureRemote ? 1 : 0,
                                  MAKELPARAM(s_downPt.x, s_downPt.y));
                 else
-                    WheelShowAt(s_downPt);
+                    WheelShowAt(s_downPt, s_gestureRemote);
                 return 1;
             }
             return Pass(code, wp, lp);
@@ -213,7 +224,10 @@ static LRESULT CALLBACK KbdProcLL(int code, WPARAM wp, LPARAM lp) {
     if (code != HC_ACTION) return CallNextHookEx(nullptr, code, wp, lp);
     if (WheelIsOpen()) {
         KBDLLHOOKSTRUCT* k = (KBDLLHOOKSTRUCT*)lp;
-        if (k->flags & LLKHF_INJECTED) return CallNextHookEx(nullptr, code, wp, lp);
+        // only our own synthetic chords are exempt; a remote session's keystrokes
+        // are injected too and must stay able to cancel / drive the wheel
+        if (IsOwnInjection(k->flags, k->dwExtraInfo, LLKHF_INJECTED))
+            return CallNextHookEx(nullptr, code, wp, lp);
         if ((wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN) && k->vkCode == VK_ESCAPE) {
             WheelCancel();
             return 1;
@@ -232,11 +246,13 @@ void RemoveMouseHook() {
     s_state = G_IDLE;
     s_wheelAcc = 0;
     s_launchUpSeen = false;
+    s_gestureRemote = false;
 }
 void EnsureMouseHook() {
     s_state = G_IDLE;
     s_wheelAcc = 0;
     s_launchUpSeen = false;
+    s_gestureRemote = false;
     if (s_mouse) {
         UnhookWindowsHookEx(s_mouse);
         s_mouse = nullptr;
@@ -247,6 +263,7 @@ void ResetHookState() {
     s_state = G_IDLE;
     s_wheelAcc = 0;
     s_launchUpSeen = false;
+    s_gestureRemote = false;
 }
 void InstallKbdHook() {
     if (!s_kbd)

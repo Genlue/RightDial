@@ -80,6 +80,9 @@ struct Behavior {
     bool  showTray      = true;
     bool  autostart     = false;
     bool  excludeFullscreen = true;   // disable gesture while a borderless-fullscreen window is foreground
+    // shown in remote-control / screen-capture pictures: 0 auto (visible when the
+    // gesture comes from a remote session or a remote tool is running), 1 always, 2 never
+    int   captureMode   = 0;
     std::vector<std::wstring> exclusions;  // process names, lowercase, e.g. "game.exe"
 };
 
