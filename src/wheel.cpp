@@ -54,6 +54,14 @@ static void ApplyCaptureAffinity(HWND h, bool capturable) {
     SetWindowDisplayAffinity(h, capturable ? 0 /* WDA_NONE */ : WDA_EXCLUDE);
 }
 
+// True when this wheel session may appear in screen captures (remote viewer,
+// captureMode=1). The affinity is also what kept the wheel out of our *own*
+// backdrop probe: with it dropped, a live refresh photographs the previous
+// frame and the glass feeds on itself — the image stacks brighter every tick.
+// So a capturable wheel samples the backdrop exactly once (in WheelShowAt,
+// before the window is shown) and then keeps it frozen.
+static bool s_capturable = false;
+
 // Rendering a Direct2D frame plus UpdateLayeredWindow is cheap but far from
 // free. WheelUpdateHover / WheelSwitchPage are called from inside the
 // low-level mouse hook, which blocks the OS raw-input thread system-wide, so
@@ -125,14 +133,18 @@ static void FreeCaptureResources() {
 
 // capture the screen area behind the wheel; acrylic gets a half-res blurred
 // snapshot, liquid glass keeps full detail for its refraction rim (half-res
-// only for very large wheels). WDA_EXCLUDEFROMCAPTURE ensures the wheel
-// window itself is excluded from the capture.
+// only for very large wheels). When the wheel is excluded from capture
+// (WDA_EXCLUDEFROMCAPTURE) it cannot photograph itself; in capturable mode the
+// window would be in the shot, so the snapshot is taken once while it is still
+// hidden and never refreshed (see s_capturable).
 static void CaptureBackdrop() {
     int bg = g_cfg.app.bgMode;
     if ((bg != 1 && bg != 2) || s_size < 16) {
         s_backdrop.clear(); s_bw = s_bh = 0;
         return;
     }
+    // self-image guard: never capture while the wheel itself is on screen
+    if (s_capturable && s_hwnd && IsWindowVisible(s_hwnd)) return;
 
     RECT want{ s_pos.x, s_pos.y,
                s_pos.x + (int)s_size, s_pos.y + (int)s_size };
@@ -324,7 +336,12 @@ LRESULT CALLBACK WheelWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 // acrylic / liquid glass: live backdrop, re-captured at the
                 // configured rate cap (backdropFps); rendering happens on
                 // capture ticks and while the open animation runs
-                if (CaptureDue()) {
+                if (s_capturable) {
+                    // capturable wheel: the backdrop is a frozen snapshot taken
+                    // before the window was shown, so there is nothing left to
+                    // tick once the open animation is over
+                    if (s_animT >= 1.0f) KillTimer(h, 1);
+                } else if (CaptureDue()) {
                     CaptureBackdrop();
                     needRender = true;
                 }
@@ -373,7 +390,8 @@ void WheelShowAt(POINT center, bool remoteInput) {
                                  WC_WHEEL, L"", WS_POPUP, 0, 0, 10, 10, nullptr, nullptr, g_hInst, nullptr);
         if (!s_hwnd) return;
     }
-    ApplyCaptureAffinity(s_hwnd, CapturableInRemote(remoteInput));
+    s_capturable = CapturableInRemote(remoteInput);
+    ApplyCaptureAffinity(s_hwnd, s_capturable);
 
     int sz = (int)std::lround(s_size);
     int x = center.x - sz / 2, y = center.y - sz / 2;

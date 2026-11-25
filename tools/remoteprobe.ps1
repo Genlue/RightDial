@@ -12,7 +12,8 @@
 # Usage:
 #   powershell -File tools\remoteprobe.ps1                 # remote path, wheel must be capturable
 #   powershell -File tools\remoteprobe.ps1 -Local          # local path (/testwheel), wheel must stay out of captures
-param([string]$Exe = "bin\RightDial.exe", [switch]$Local)
+#   powershell -File tools\remoteprobe.ps1 -GlassSelf      # 液态玻璃背景不得把自己拍进去（需 bgMode=2）
+param([string]$Exe = "bin\RightDial.exe", [switch]$Local, [switch]$GlassSelf)
 
 Add-Type -TypeDefinition @"
 using System;
@@ -128,6 +129,44 @@ $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 Start-Sleep -Milliseconds 150
 
 $opened = $false
+if ($GlassSelf) {
+  # A capturable wheel is part of its own backdrop probe: if the backdrop keeps
+  # refreshing, every tick re-photographs the previous frame and the glass
+  # stacks. Open the wheel through remote input (=> capturable) and require the
+  # picture to be stable while the button is still held.
+  $cfgPath = Join-Path $env:APPDATA "RightDial\config.json"
+  if (Test-Path $cfgPath) {
+    $bg = (Get-Content $cfgPath -Raw | ConvertFrom-Json).appearance.bgMode
+    if ($bg -ne 2) { Write-Host "[!] config bgMode=$bg，本项检查需要液态玻璃（bgMode=2），结果无意义" }
+  }
+  [RDProbe]::Mouse([RDProbe]::RDOWN, 0, 0)
+  for ($i = 1; $i -le 6; $i++) { [RDProbe]::Mouse([RDProbe]::MOVE, 12, -4); Start-Sleep -Milliseconds 25 }
+  Start-Sleep -Milliseconds 500
+  $wheel = [RDProbe]::FindByClass($cls)
+  if (-not (($wheel -ne [IntPtr]::Zero) -and [RDProbe]::IsWindowVisible($wheel))) {
+    Write-Host "[FAIL] 轮盘没有出现，无法检查背景叠帧"
+    $fail++
+    [RDProbe]::Mouse([RDProbe]::RUP, 0, 0)
+  } else {
+    $r = New-Object RDProbe+RECT
+    [RDProbe]::GetWindowRect($wheel, [ref]$r) | Out-Null
+    $w = $r.R - $r.L; $h = $r.B - $r.T
+    $a = [RDProbe]::Grab($r.L, $r.T, $w, $h)
+    Start-Sleep -Milliseconds 1700       # several backdropFps ticks later
+    $b = [RDProbe]::Grab($r.L, $r.T, $w, $h)
+    $drift = [RDProbe]::DiffPct($a, $b)
+    Write-Host ("[i] 静置 1.7s 后画面自变化={0:N1}%" -f $drift)
+    if ($drift -lt 1.0) { Write-Host "[PASS] 液态玻璃背景没有把自己拍进去" }
+    else { Write-Host "[FAIL] 背景在叠帧：轮盘把自己拍进了折射背景"; $fail++ }
+    [RDProbe]::Key(0x1B, $false); [RDProbe]::Key(0x1B, $true)
+    Start-Sleep -Milliseconds 250
+    [RDProbe]::Mouse([RDProbe]::RUP, 0, 0)
+    Start-Sleep -Milliseconds 150
+  }
+  if ($fail -eq 0) { Write-Host "ALL PASS" } else { Write-Host "$fail 项失败" }
+  exit $fail
+}
+
 if ($Local) {
   # /testwheel goes through the normal "physical input" path
   & (Resolve-Path $Exe) /testwheel | Out-Null
